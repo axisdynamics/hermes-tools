@@ -234,8 +234,52 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
         except Exception as e:
             return False, str(e)[:60]
 
-    # Generic: test connectivity only
-    return check_health(entry, timeout), "connectivity only (no deep probe)"
+    # Google / Gemini: uses key as query param
+    if provider in ("google", "gemini"):
+        base = url or "https://generativelanguage.googleapis.com/v1beta"
+        try:
+            req = urllib.request.Request(f"{base.rstrip('/')}/models?key={api_key}")
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return resp.status == 200, f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()[:200]
+            if e.code == 401: return False, "HTTP 401 — invalid API key"
+            if e.code == 429: return False, "HTTP 429 — rate limited"
+            return False, f"HTTP {e.code} — {body[:80]}"
+        except Exception as e:
+            return False, str(e)[:60]
+
+    # xAI, Groq, NVIDIA, Z.AI, Kimi, MiniMax, Alibaba, LM Studio, Copilot...
+    # All speak OpenAI-compatible /v1/models with Bearer token
+    openai_compat = {
+        "xai": "https://api.x.ai/v1",
+        "groq": "https://api.groq.com/openai/v1",
+        "nvidia": "https://integrate.api.nvidia.com/v1",
+        "zai": "https://api.z.ai/api/paas/v4",
+        "kimi-coding": "https://api.moonshot.ai/v1",
+        "minimax": "https://api.minimax.io/anthropic",
+        "alibaba": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        "lmstudio": url or "http://127.0.0.1:1234/v1",
+        "copilot": "https://models.github.ai/v1",
+    }
+    if provider in openai_compat:
+        base = url or openai_compat[provider]
+        try:
+            req = urllib.request.Request(f"{base.rstrip('/')}/models")
+            req.add_header("Authorization", f"Bearer {api_key}")
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return resp.status == 200, f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()[:200]
+            if e.code == 401: return False, "HTTP 401 — invalid API key"
+            if e.code == 429: return False, "HTTP 429 — rate limited / quota"
+            if e.code == 403: return False, "HTTP 403 — access denied (check key scope)"
+            return False, f"HTTP {e.code} — {body[:80]}"
+        except Exception as e:
+            return False, str(e)[:60]
+
+    # Generic: test connectivity only (unknown provider or no deep probe available)
+    return check_health(entry, timeout), "connectivity only (no deep probe for this provider)"
 
 
 def cmd_test(args=None):
