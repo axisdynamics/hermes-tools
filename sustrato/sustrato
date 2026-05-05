@@ -275,6 +275,124 @@ The chain is: primary (0) → secondary (1) → tertiary (2).
 Auto-failover activates after 3 consecutive failures.""")
 
 
+def cmd_setup(_args=None):
+    """Interactive setup wizard — mimics hermes setup style."""
+    cfg = load_config()
+    chain = cfg.get("chain", [])
+
+    print()
+    print("╔══════════════════════════════════════════════╗")
+    print("║   🔄  SUSTRATO SETUP — Provider Failover    ║")
+    print("╚══════════════════════════════════════════════╝")
+    print()
+
+    if chain:
+        print(f"Current chain: {len(chain)} substrate(s)")
+        print()
+
+    # Step 1: Primary
+    print("── Primary substrate (your main provider) ──")
+    print("   This is your everyday driver.")
+    provider = _prompt("   Provider", default=chain[0]["provider"] if chain else "deepseek",
+                       examples=["deepseek", "openrouter", "anthropic", "openai", "google"])
+    model = _prompt("   Model", default=chain[0]["model"] if chain else "deepseek-v4-pro",
+                    examples=["deepseek-v4-pro", "claude-sonnet-4", "gpt-4o"])
+    print()
+
+    # Step 2: Secondary fallback
+    print("── Secondary substrate (cloud fallback) ──")
+    print("   Kicks in when primary fails. Can be same/different provider.")
+    add_secondary = _confirm("   Add secondary fallback?")
+    sec_provider = sec_model = None
+    if add_secondary:
+        sec_provider = _prompt("   Provider", default=chain[1]["provider"] if len(chain) > 1 else "openrouter",
+                               examples=["openrouter", "deepseek", "anthropic"])
+        sec_model = _prompt("   Model", default=chain[1]["model"] if len(chain) > 1 else "anthropic/claude-sonnet-4",
+                            examples=["anthropic/claude-sonnet-4", "deepseek-v4-pro"])
+    print()
+
+    # Step 3: Tertiary (local)
+    print("── Tertiary substrate (local Ollama) ──")
+    print("   Runs offline. Slower but always available.")
+    add_tertiary = _confirm("   Add local Ollama fallback?")
+    ter_provider = ter_model = None
+    if add_tertiary:
+        ter_provider = "ollama"
+        default_model = chain[2]["model"] if len(chain) > 2 else "llama3:8b"
+        ter_model = _prompt("   Ollama model", default=default_model,
+                            examples=["llama3:8b", "llama3:70b", "mistral:7b", "phi3:14b"])
+        ollama_url = _prompt("   URL", default="http://localhost:11434/v1")
+    print()
+
+    # Step 4: Auto-failover
+    print("── Auto-failover ──")
+    auto = _confirm("   Enable automatic failover?",
+                     default=cfg.get("auto_failover", True))
+    print()
+
+    # Build chain
+    new_chain = []
+    new_chain.append({"provider": provider, "model": model})
+    if add_secondary and sec_provider:
+        new_chain.append({"provider": sec_provider, "model": sec_model})
+    if add_tertiary and ter_provider:
+        entry = {"provider": ter_provider, "model": ter_model, "local": True}
+        if ollama_url != "http://localhost:11434/v1":
+            entry["url"] = ollama_url
+        new_chain.append(entry)
+
+    cfg["chain"] = new_chain
+    cfg["auto_failover"] = auto
+    save_config(cfg)
+
+    # Reset state
+    state = {"active_index": 0, "failures": {}, "last_switch": None}
+    save_state(state)
+
+    print("── Summary ──")
+    print()
+    labels = ["PRIMARY", "SECONDARY", "TERTIARY"]
+    for i, entry in enumerate(new_chain):
+        label = labels[i]
+        url_str = f" @ {entry.get('url', '')}" if entry.get('url') else ""
+        local_tag = " [LOCAL]" if entry.get('local') else ""
+        print(f"  [{label}] {entry['provider']}/{entry['model']}{url_str}{local_tag}")
+
+    print()
+    print(f"  Auto-failover: {'ON' if auto else 'OFF'}")
+    print()
+    print("✓ Configuration saved to ~/.hermes/sustrato.yaml")
+    print("  Restart Hermes or /reset to activate.")
+
+
+def _prompt(label: str, default: str = "", examples: list = None) -> str:
+    """Prompt for input with default and examples."""
+    default_str = f" [{default}]" if default else ""
+    print(f"{label}{default_str}: ", end="", flush=True)
+    if examples:
+        print(f"(e.g. {', '.join(examples)})")
+        print(f"{label}: ", end="", flush=True)
+    try:
+        value = input().strip()
+        return value if value else default
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+
+
+def _confirm(prompt: str, default: bool = True) -> bool:
+    """Simple Y/n confirmation."""
+    yn = "Y/n" if default else "y/N"
+    try:
+        value = input(f"{prompt} [{yn}]: ").strip().lower()
+        if not value:
+            return default
+        return value in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return default
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 def main():
@@ -293,6 +411,7 @@ def main():
         "switch": cmd_switch,
         "reset": lambda _: cmd_reset(),
         "auto": cmd_auto,
+        "setup": lambda _: cmd_setup(),
         "help": lambda _: cmd_help(),
     }
 

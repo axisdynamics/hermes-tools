@@ -65,6 +65,9 @@ hermes sustrato list
 # Health-check all substrates
 hermes sustrato test
 
+# Interactive setup wizard
+hermes sustrato setup
+
 # Manually switch to fallback
 hermes sustrato switch 1     # → secondary
 hermes sustrato switch 2     # → tertiary (ollama)
