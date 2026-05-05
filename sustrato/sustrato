@@ -44,22 +44,25 @@ def _get_hermes_providers() -> Dict[str, dict]:
                 "env_vars": list(getattr(pcfg, "api_key_env_vars", ())),
             }
     except ImportError:
-        pass  # fall back to built-in list
+        pass  # fall back to built-in list below
 
-    # Always add these — they're not in PROVIDER_REGISTRY
-    if "openrouter" not in providers:
-        providers["openrouter"] = {
-            "name": "OpenRouter",
-            "base_url": "https://openrouter.ai/api/v1",
-            "auth_type": "api_key",
-            "env_vars": ["OPENROUTER_API_KEY"],
-        }
-    if "ollama" not in providers:
-        providers["ollama"] = {
-            "name": "Ollama (local)",
-            "base_url": "http://localhost:11434/v1",
-            "auth_type": "none",
-            "env_vars": [],
+    # Fallback: built-in provider catalog (used when Hermes source unavailable)
+    if not providers:
+        providers = {
+            "deepseek":      {"name": "DeepSeek",           "base_url": "https://api.deepseek.com/v1",               "auth_type": "api_key", "env_vars": ["DEEPSEEK_API_KEY"]},
+            "openrouter":    {"name": "OpenRouter",         "base_url": "https://openrouter.ai/api/v1",             "auth_type": "api_key", "env_vars": ["OPENROUTER_API_KEY"]},
+            "anthropic":     {"name": "Anthropic",          "base_url": "https://api.anthropic.com",                "auth_type": "api_key", "env_vars": ["ANTHROPIC_API_KEY"]},
+            "openai-codex":  {"name": "OpenAI Codex",       "base_url": "https://api.openai.com/v1",                "auth_type": "oauth",   "env_vars": []},
+            "google":        {"name": "Google AI Studio",   "base_url": "https://generativelanguage.googleapis.com", "auth_type": "api_key", "env_vars": ["GOOGLE_API_KEY"]},
+            "xai":           {"name": "xAI / Grok",         "base_url": "https://api.x.ai/v1",                      "auth_type": "api_key", "env_vars": ["XAI_API_KEY"]},
+            "nvidia":        {"name": "NVIDIA NIM",         "base_url": "https://integrate.api.nvidia.com/v1",      "auth_type": "api_key", "env_vars": ["NVIDIA_API_KEY"]},
+            "zai":           {"name": "Z.AI / GLM",         "base_url": "https://api.z.ai/api/paas/v4",             "auth_type": "api_key", "env_vars": ["GLM_API_KEY"]},
+            "kimi-coding":   {"name": "Kimi / Moonshot",    "base_url": "https://api.moonshot.ai/v1",               "auth_type": "api_key", "env_vars": ["KIMI_API_KEY"]},
+            "minimax":       {"name": "MiniMax",            "base_url": "https://api.minimax.io/anthropic",          "auth_type": "api_key", "env_vars": ["MINIMAX_API_KEY"]},
+            "alibaba":       {"name": "Alibaba DashScope",  "base_url": "https://dashscope-intl.aliyuncs.com",       "auth_type": "api_key", "env_vars": ["DASHSCOPE_API_KEY"]},
+            "lmstudio":      {"name": "LM Studio",          "base_url": "http://127.0.0.1:1234/v1",                 "auth_type": "api_key", "env_vars": ["LM_API_KEY"]},
+            "copilot":       {"name": "GitHub Copilot",     "base_url": "https://models.github.ai",                 "auth_type": "api_key", "env_vars": ["GITHUB_TOKEN"]},
+            "ollama":        {"name": "Ollama (local)",     "base_url": "http://localhost:11434/v1",                "auth_type": "none",    "env_vars": []},
         }
 
     return providers
@@ -67,8 +70,16 @@ def _get_hermes_providers() -> Dict[str, dict]:
 
 HERMES_PROVIDERS = _get_hermes_providers()
 
-CONFIG_PATH = Path.home() / ".hermes" / "sustrato.yaml"
-STATE_PATH = Path.home() / ".hermes" / "sustrato_state.json"
+# ── Paths (respect HERMES_HOME for sandboxing) ────────────────────────
+
+def _hermes_dir() -> Path:
+    """Return ~/.hermes, respecting HERMES_HOME env var."""
+    if os.environ.get("HERMES_HOME"):
+        return Path(os.environ["HERMES_HOME"])
+    return Path.home() / ".hermes"
+
+CONFIG_PATH = _hermes_dir() / "sustrato.yaml"
+STATE_PATH = _hermes_dir() / "sustrato_state.json"
 
 # ── Config ────────────────────────────────────────────────────────────
 
