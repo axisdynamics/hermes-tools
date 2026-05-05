@@ -80,7 +80,9 @@ def check_health(entry: dict, timeout: int = 5) -> bool:
 
     # Ollama: try actual API endpoints, not just TCP
     if provider == "ollama" or "localhost" in url or "192.168" in url or "10." in url or "172." in url:
-        base = (url or "http://localhost:11434/v1").rstrip("/")
+        base = (url or "http://localhost:11434").rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]  # strip /v1 — /api/tags is at root
         for ep in _OLLAMA_ENDPOINTS:
             try:
                 req = urllib.request.Request(f"{base}{ep}")
@@ -153,7 +155,10 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
 
     # Ollama / local: already covered by basic check, but try /api/tags
     if provider == "ollama" or "localhost" in url or "192.168" in url or "10." in url:
-        base = (url or "http://localhost:11434/v1").rstrip("/")
+        # Strip /v1 suffix — Ollama's /api/tags is at root, not under /v1
+        base = (url or "http://localhost:11434").rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
         try:
             req = urllib.request.Request(f"{base}/api/tags")
             resp = urllib.request.urlopen(req, timeout=timeout)
@@ -162,7 +167,8 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
                 models = [m["name"] for m in data.get("models", [])]
                 if model in models or any(model in m for m in models):
                     return True, "model found"
-                return False, f"model '{model}' not in {models[:3]}..."
+                available = ", ".join(models[:5])
+                return False, f"model '{model}' not found. Available: {available}"
             return False, f"HTTP {resp.status}"
         except urllib.error.HTTPError as e:
             return False, f"HTTP {e.code}"
