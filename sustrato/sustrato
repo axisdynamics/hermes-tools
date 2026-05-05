@@ -20,9 +20,52 @@ import socket
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List
 
 import yaml
+
+# ── Load Hermes provider registry (canonical source) ──────────────────
+
+def _get_hermes_providers() -> Dict[str, dict]:
+    """Extract provider list from Hermes' own PROVIDER_REGISTRY.
+    Returns {provider_id: {name, base_url, env_vars, ...}} for all native providers."""
+    providers = {}
+
+    # Try importing from Hermes source
+    try:
+        hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        sys.path.insert(0, os.path.join(hermes_home, "hermes-agent"))
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        for pid, pcfg in PROVIDER_REGISTRY.items():
+            providers[pid] = {
+                "name": pcfg.name,
+                "base_url": getattr(pcfg, "inference_base_url", ""),
+                "auth_type": getattr(pcfg, "auth_type", "api_key"),
+                "env_vars": list(getattr(pcfg, "api_key_env_vars", ())),
+            }
+    except ImportError:
+        pass  # fall back to built-in list
+
+    # Always add these — they're not in PROVIDER_REGISTRY
+    if "openrouter" not in providers:
+        providers["openrouter"] = {
+            "name": "OpenRouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "auth_type": "api_key",
+            "env_vars": ["OPENROUTER_API_KEY"],
+        }
+    if "ollama" not in providers:
+        providers["ollama"] = {
+            "name": "Ollama (local)",
+            "base_url": "http://localhost:11434/v1",
+            "auth_type": "none",
+            "env_vars": [],
+        }
+
+    return providers
+
+
+HERMES_PROVIDERS = _get_hermes_providers()
 
 CONFIG_PATH = Path.home() / ".hermes" / "sustrato.yaml"
 STATE_PATH = Path.home() / ".hermes" / "sustrato_state.json"
@@ -83,6 +126,31 @@ def check_health(entry: dict, timeout: int = 5) -> bool:
         return True
     except Exception:
         return False
+
+def _top_providers() -> list:
+    """Return top 8 provider IDs for display in prompts."""
+    # Common ones first, then alphabetical
+    top = ["deepseek", "openrouter", "anthropic", "openai-codex", "google", "xai", "ollama"]
+    others = [k for k in sorted(HERMES_PROVIDERS) if k not in top]
+    return top + others[:3]
+
+
+def cmd_providers(_args=None):
+    """List all available providers from Hermes registry."""
+    print("Available providers (from Hermes PROVIDER_REGISTRY):")
+    print("─" * 55)
+    for pid, info in sorted(HERMES_PROVIDERS.items()):
+        name = info["name"]
+        auth = info.get("auth_type", "?")
+        env_str = ", ".join(info.get("env_vars", []))
+        if env_str:
+            env_str = f"  [{env_str}]"
+        print(f"  {pid:<22} {name:<28} {auth}{env_str}")
+    print("─" * 55)
+    print(f"Total: {len(HERMES_PROVIDERS)} providers")
+    print()
+    print("Use any provider ID with: sustrato add <provider> <model>")
+
 
 # ── Commands ──────────────────────────────────────────────────────────
 
@@ -264,6 +332,7 @@ EXAMPLES:
   sustrato add deepseek deepseek-v4-pro
   sustrato add openrouter anthropic/claude-sonnet-4
   sustrato add ollama llama3:8b --local
+  sustrato providers              # list all available providers
   sustrato list
   sustrato test
   sustrato switch 1
@@ -294,7 +363,7 @@ def cmd_setup(_args=None):
     print("── Primary substrate (your main provider) ──")
     print("   This is your everyday driver.")
     provider = _prompt("   Provider", default=chain[0]["provider"] if chain else "deepseek",
-                       examples=["deepseek", "openrouter", "anthropic", "openai", "google"])
+                       examples=_top_providers())
     model = _prompt("   Model", default=chain[0]["model"] if chain else "deepseek-v4-pro",
                     examples=["deepseek-v4-pro", "claude-sonnet-4", "gpt-4o"])
     print()
@@ -411,6 +480,7 @@ def main():
         "switch": cmd_switch,
         "reset": lambda _: cmd_reset(),
         "auto": cmd_auto,
+        "providers": lambda _: cmd_providers(),
         "setup": lambda _: cmd_setup(),
         "help": lambda _: cmd_help(),
     }
