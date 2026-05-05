@@ -278,6 +278,45 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
         except Exception as e:
             return False, str(e)[:60]
 
+    # OAuth providers: check token validity from auth.json
+    oauth_providers = ["nous", "openai-codex", "qwen-oauth", "google-gemini-cli",
+                       "minimax-oauth", "copilot-acp"]
+    if provider in oauth_providers:
+        auth_path = _hermes_dir() / "auth.json"
+        if not auth_path.exists():
+            return False, "no auth.json — run 'hermes login' first"
+        try:
+            auth = json.loads(auth_path.read_text())
+            pdata = auth.get("providers", {}).get(provider)
+            if not pdata:
+                return False, f"not authenticated — run 'hermes login --provider {provider}'"
+            access_token = pdata.get("access_token", "")
+            expires_at = pdata.get("expires_at", "")
+            if not access_token:
+                return False, "no access token in auth.json"
+            if expires_at:
+                exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                now = datetime.now().astimezone()
+                if exp < now:
+                    return False, f"token expired at {expires_at[:19]} — run 'hermes login'"
+            # Test the token against the provider's endpoint
+            base = url or pdata.get("inference_base_url", "")
+            if not base:
+                return True, "token present (no endpoint to test)"
+            try:
+                req = urllib.request.Request(f"{base.rstrip('/')}/models")
+                req.add_header("Authorization", f"Bearer {access_token}")
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                return resp.status == 200, f"HTTP {resp.status} — token valid"
+            except urllib.error.HTTPError as e:
+                if e.code == 401: return False, "HTTP 401 — token expired or revoked"
+                if e.code == 403: return False, "HTTP 403 — insufficient scope"
+                return False, f"HTTP {e.code}"
+            except Exception as e:
+                return False, str(e)[:60]
+        except Exception as e:
+            return False, f"auth.json parse error: {str(e)[:60]}"
+
     # Generic: test connectivity only (unknown provider or no deep probe available)
     return check_health(entry, timeout), "connectivity only (no deep probe for this provider)"
 
