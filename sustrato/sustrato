@@ -1,93 +1,62 @@
 #!/usr/bin/env python3
 """
-sustrato — Multi-layer provider failover CLI for Hermes Agent.
-
-Standalone CLI tool to manage substrate chains.
-Also works as a Hermes plugin for in-session slash commands.
-
-Usage:
-    sustrato add <provider> <model> [--url <endpoint>] [--local]
-    sustrato remove <index>
-    sustrato list
-    sustrato test
-    sustrato switch <index>
-    sustrato reset
-    sustrato auto <on|off>
+sustrato — Multi-layer provider failover CLI for Hermes Agent v1.1.0.
 """
-import json
-import os
-import socket
-import sys
+import json, os, socket, sys, urllib.request, urllib.error
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List
-
 import yaml
 
-# ── Load Hermes provider registry (canonical source) ──────────────────
-
-def _get_hermes_providers() -> Dict[str, dict]:
-    """Extract provider list from Hermes' own PROVIDER_REGISTRY.
-    Returns {provider_id: {name, base_url, env_vars, ...}} for all native providers."""
-    providers = {}
-
-    # Try importing from Hermes source
-    try:
-        hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
-        sys.path.insert(0, os.path.join(hermes_home, "hermes-agent"))
-        from hermes_cli.auth import PROVIDER_REGISTRY
-        for pid, pcfg in PROVIDER_REGISTRY.items():
-            providers[pid] = {
-                "name": pcfg.name,
-                "base_url": getattr(pcfg, "inference_base_url", ""),
-                "auth_type": getattr(pcfg, "auth_type", "api_key"),
-                "env_vars": list(getattr(pcfg, "api_key_env_vars", ())),
-            }
-    except ImportError:
-        pass  # fall back to built-in list below
-
-    # Fallback: built-in provider catalog (used when Hermes source unavailable)
-    if not providers:
-        providers = {
-            "deepseek":      {"name": "DeepSeek",           "base_url": "https://api.deepseek.com/v1",               "auth_type": "api_key", "env_vars": ["DEEPSEEK_API_KEY"]},
-            "openrouter":    {"name": "OpenRouter",         "base_url": "https://openrouter.ai/api/v1",             "auth_type": "api_key", "env_vars": ["OPENROUTER_API_KEY"]},
-            "anthropic":     {"name": "Anthropic",          "base_url": "https://api.anthropic.com",                "auth_type": "api_key", "env_vars": ["ANTHROPIC_API_KEY"]},
-            "openai-codex":  {"name": "OpenAI Codex",       "base_url": "https://api.openai.com/v1",                "auth_type": "oauth",   "env_vars": []},
-            "google":        {"name": "Google AI Studio",   "base_url": "https://generativelanguage.googleapis.com", "auth_type": "api_key", "env_vars": ["GOOGLE_API_KEY"]},
-            "xai":           {"name": "xAI / Grok",         "base_url": "https://api.x.ai/v1",                      "auth_type": "api_key", "env_vars": ["XAI_API_KEY"]},
-            "nvidia":        {"name": "NVIDIA NIM",         "base_url": "https://integrate.api.nvidia.com/v1",      "auth_type": "api_key", "env_vars": ["NVIDIA_API_KEY"]},
-            "zai":           {"name": "Z.AI / GLM",         "base_url": "https://api.z.ai/api/paas/v4",             "auth_type": "api_key", "env_vars": ["GLM_API_KEY"]},
-            "kimi-coding":   {"name": "Kimi / Moonshot",    "base_url": "https://api.moonshot.ai/v1",               "auth_type": "api_key", "env_vars": ["KIMI_API_KEY"]},
-            "minimax":       {"name": "MiniMax",            "base_url": "https://api.minimax.io/anthropic",          "auth_type": "api_key", "env_vars": ["MINIMAX_API_KEY"]},
-            "alibaba":       {"name": "Alibaba DashScope",  "base_url": "https://dashscope-intl.aliyuncs.com",       "auth_type": "api_key", "env_vars": ["DASHSCOPE_API_KEY"]},
-            "lmstudio":      {"name": "LM Studio",          "base_url": "http://127.0.0.1:1234/v1",                 "auth_type": "api_key", "env_vars": ["LM_API_KEY"]},
-            "copilot":       {"name": "GitHub Copilot",     "base_url": "https://models.github.ai",                 "auth_type": "api_key", "env_vars": ["GITHUB_TOKEN"]},
-            "ollama":        {"name": "Ollama (local)",     "base_url": "http://localhost:11434/v1",                "auth_type": "none",    "env_vars": []},
-        }
-
-    return providers
-
-
-HERMES_PROVIDERS = _get_hermes_providers()
-
 # ── Paths (respect HERMES_HOME for sandboxing) ────────────────────────
-
 def _hermes_dir() -> Path:
-    """Return ~/.hermes, respecting HERMES_HOME env var."""
     if os.environ.get("HERMES_HOME"):
         return Path(os.environ["HERMES_HOME"])
     return Path.home() / ".hermes"
 
 CONFIG_PATH = _hermes_dir() / "sustrato.yaml"
-STATE_PATH = _hermes_dir() / "sustrato_state.json"
+STATE_PATH  = _hermes_dir() / "sustrato_state.json"
 
-# ── Config ────────────────────────────────────────────────────────────
+# ── Hermes provider registry ──────────────────────────────────────────
+def _get_hermes_providers() -> Dict[str, dict]:
+    providers = {}
+    try:
+        hermes_home = os.environ.get("HERMES_HOME", str(Path.home()/".hermes"))
+        sys.path.insert(0, os.path.join(hermes_home, "hermes-agent"))
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        for pid, pcfg in PROVIDER_REGISTRY.items():
+            providers[pid] = {"name": pcfg.name, "base_url": getattr(pcfg, "inference_base_url", ""),
+                              "auth_type": getattr(pcfg, "auth_type", "api_key"),
+                              "env_vars": list(getattr(pcfg, "api_key_env_vars", ()))}
+    except ImportError:
+        pass
+    if not providers:
+        providers = {
+            "deepseek":   {"name":"DeepSeek","base_url":"https://api.deepseek.com/v1","auth_type":"api_key","env_vars":["DEEPSEEK_API_KEY"]},
+            "openrouter": {"name":"OpenRouter","base_url":"https://openrouter.ai/api/v1","auth_type":"api_key","env_vars":["OPENROUTER_API_KEY"]},
+            "anthropic":  {"name":"Anthropic","base_url":"https://api.anthropic.com","auth_type":"api_key","env_vars":["ANTHROPIC_API_KEY"]},
+            "openai":     {"name":"OpenAI","base_url":"https://api.openai.com/v1","auth_type":"api_key","env_vars":["OPENAI_API_KEY"]},
+            "openai-codex":{"name":"OpenAI Codex","base_url":"https://api.openai.com/v1","auth_type":"oauth","env_vars":[]},
+            "google":     {"name":"Google AI Studio","base_url":"https://generativelanguage.googleapis.com","auth_type":"api_key","env_vars":["GOOGLE_API_KEY"]},
+            "xai":        {"name":"xAI / Grok","base_url":"https://api.x.ai/v1","auth_type":"api_key","env_vars":["XAI_API_KEY"]},
+            "nvidia":     {"name":"NVIDIA NIM","base_url":"https://integrate.api.nvidia.com/v1","auth_type":"api_key","env_vars":["NVIDIA_API_KEY"]},
+            "zai":        {"name":"Z.AI / GLM","base_url":"https://api.z.ai/api/paas/v4","auth_type":"api_key","env_vars":["GLM_API_KEY"]},
+            "kimi-coding":{"name":"Kimi / Moonshot","base_url":"https://api.moonshot.ai/v1","auth_type":"api_key","env_vars":["KIMI_API_KEY"]},
+            "minimax":    {"name":"MiniMax","base_url":"https://api.minimax.io/anthropic","auth_type":"api_key","env_vars":["MINIMAX_API_KEY"]},
+            "alibaba":    {"name":"Alibaba DashScope","base_url":"https://dashscope-intl.aliyuncs.com","auth_type":"api_key","env_vars":["DASHSCOPE_API_KEY"]},
+            "lmstudio":   {"name":"LM Studio","base_url":"http://127.0.0.1:1234/v1","auth_type":"api_key","env_vars":["LM_API_KEY"]},
+            "copilot":    {"name":"GitHub Copilot","base_url":"https://models.github.ai","auth_type":"api_key","env_vars":["GITHUB_TOKEN"]},
+            "ollama":     {"name":"Ollama (local)","base_url":"http://localhost:11434/v1","auth_type":"none","env_vars":[]},
+        }
+    return providers
 
+HERMES_PROVIDERS = _get_hermes_providers()
+
+# ── Config I/O ────────────────────────────────────────────────────────
 def load_config() -> dict:
     if CONFIG_PATH.exists():
-        with open(CONFIG_PATH) as f:
-            return yaml.safe_load(f) or {}
-    return {"chain": [], "auto_failover": True, "health_check_timeout": 5}
+        with open(CONFIG_PATH) as f: return yaml.safe_load(f) or {}
+    return {"chain": [], "auto_failover": True, "health_check_timeout": 5, "fail_threshold": 3}
 
 def save_config(cfg: dict):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -96,239 +65,327 @@ def save_config(cfg: dict):
 
 def load_state() -> dict:
     if STATE_PATH.exists():
-        with open(STATE_PATH) as f:
-            return json.load(f)
-    return {"active_index": 0, "failures": {}, "last_switch": None}
+        with open(STATE_PATH) as f: return json.load(f)
+    return {"active_index": 0, "failures": {}, "last_switch": None, "last_success": None}
 
 def save_state(state: dict):
-    with open(STATE_PATH, "w") as f:
-        json.dump(state, f, indent=2)
+    with open(STATE_PATH, "w") as f: json.dump(state, f, indent=2)
 
-# ── Health check ──────────────────────────────────────────────────────
+# ── Health check (real endpoint probes) ───────────────────────────────
+_OLLAMA_ENDPOINTS = ["/api/tags", "/models", "/"]
 
 def check_health(entry: dict, timeout: int = 5) -> bool:
     provider = entry.get("provider", "")
     url = entry.get("url", "")
 
-    if provider == "ollama" or "localhost" in url:
-        base = url or "http://localhost:11434/v1"
-        try:
-            import urllib.request
-            req = urllib.request.Request(f"{base.rstrip('/')}/models")
-            urllib.request.urlopen(req, timeout=timeout)
-            return True
-        except Exception:
-            return False
+    # Ollama: try actual API endpoints, not just TCP
+    if provider == "ollama" or "localhost" in url or "192.168" in url or "10." in url or "172." in url:
+        base = (url or "http://localhost:11434/v1").rstrip("/")
+        for ep in _OLLAMA_ENDPOINTS:
+            try:
+                req = urllib.request.Request(f"{base}{ep}")
+                resp = urllib.request.urlopen(req, timeout=timeout)
+                if resp.status == 200:
+                    return True
+            except Exception:
+                continue
+        return False
 
+    # Cloud providers: TCP connect to API host
     endpoints = {
-        "deepseek": "api.deepseek.com",
-        "openrouter": "openrouter.ai",
-        "anthropic": "api.anthropic.com",
-        "openai": "api.openai.com",
-        "google": "generativelanguage.googleapis.com",
-        "xai": "api.x.ai",
-        "groq": "api.groq.com",
+        "deepseek": ("api.deepseek.com", 443),
+        "openrouter": ("openrouter.ai", 443),
+        "anthropic": ("api.anthropic.com", 443),
+        "openai": ("api.openai.com", 443),
+        "openai-codex": ("api.openai.com", 443),
+        "google": ("generativelanguage.googleapis.com", 443),
+        "xai": ("api.x.ai", 443),
+        "groq": ("api.groq.com", 443),
+        "nvidia": ("integrate.api.nvidia.com", 443),
     }
-    host = endpoints.get(provider)
-    if not host:
+    target = endpoints.get(provider)
+    if not target:
         return True
     try:
-        socket.create_connection((host, 443), timeout=timeout)
+        socket.create_connection(target, timeout=timeout)
         return True
     except Exception:
         return False
 
+# ── Auto-failover logic ────────────────────────────────────────────────
+def record_failure():
+    """Record a failure on the active substrate. Switch if threshold reached."""
+    cfg = load_config()
+    state = load_state()
+    chain = cfg.get("chain", [])
+    if len(chain) <= 1:
+        return None
+    if not cfg.get("auto_failover", True):
+        return None
+
+    active = state.get("active_index", 0)
+    threshold = cfg.get("fail_threshold", 3)
+    failures = state.setdefault("failures", {})
+    key = str(active)
+    failures[key] = failures.get(key, 0) + 1
+    state["last_switch"] = datetime.now().isoformat()
+    save_state(state)
+
+    if failures[key] >= threshold and active + 1 < len(chain):
+        next_idx = active + 1
+        state["active_index"] = next_idx
+        state["failures"] = {}
+        save_state(state)
+        entry = chain[next_idx]
+        return f"Auto-switched to substrate [{next_idx}]: {entry['provider']}/{entry['model']}"
+    return None
+
+def record_success():
+    """Record a success — resets failure counter for active substrate."""
+    state = load_state()
+    state["last_success"] = datetime.now().isoformat()
+    key = str(state.get("active_index", 0))
+    if key in state.get("failures", {}):
+        state["failures"][key] = 0
+    save_state(state)
+
+# ── Top providers helper ──────────────────────────────────────────────
 def _top_providers() -> list:
-    """Return top 8 provider IDs for display in prompts."""
-    # Common ones first, then alphabetical
-    top = ["deepseek", "openrouter", "anthropic", "openai-codex", "google", "xai", "ollama"]
+    top = ["deepseek", "openrouter", "anthropic", "openai-codex", "openai", "google", "xai", "ollama"]
     others = [k for k in sorted(HERMES_PROVIDERS) if k not in top]
     return top + others[:3]
 
-
-def cmd_providers(_args=None):
-    """List all available providers from Hermes registry."""
-    print("Available providers (from Hermes PROVIDER_REGISTRY):")
-    print("─" * 55)
-    for pid, info in sorted(HERMES_PROVIDERS.items()):
-        name = info["name"]
-        auth = info.get("auth_type", "?")
-        env_str = ", ".join(info.get("env_vars", []))
-        if env_str:
-            env_str = f"  [{env_str}]"
-        print(f"  {pid:<22} {name:<28} {auth}{env_str}")
-    print("─" * 55)
-    print(f"Total: {len(HERMES_PROVIDERS)} providers")
-    print()
-    print("Use any provider ID with: sustrato add <provider> <model>")
-
-
 # ── Commands ──────────────────────────────────────────────────────────
-
 def cmd_add(args):
     if len(args) < 2:
         print("Usage: sustrato add <provider> <model> [--url <endpoint>] [--local]")
         sys.exit(1)
-
-    provider = args[0]
-    model = args[1]
-    url = None
-    is_local = False
-
+    provider, model = args[0], args[1]
+    url, is_local = None, False
     remaining = args[2:]
     i = 0
     while i < len(remaining):
-        if remaining[i] == "--url" and i + 1 < len(remaining):
-            url = remaining[i + 1]
-            i += 2
+        if remaining[i] == "--url" and i+1 < len(remaining):
+            url = remaining[i+1]; i += 2
         elif remaining[i] == "--local":
-            is_local = True
-            i += 1
+            is_local = True; i += 1
         else:
             i += 1
-
     if is_local and not url:
         url = "http://localhost:11434/v1"
 
     cfg = load_config()
-    entry = {"provider": provider, "model": model}
-    if url:
-        entry["url"] = url
-    if is_local:
-        entry["local"] = True
+    chain = cfg.setdefault("chain", [])
 
-    cfg.setdefault("chain", []).append(entry)
+    # --- FIX: detect duplicates ---
+    for idx, existing in enumerate(chain):
+        if existing.get("provider") == provider and existing.get("model") == model:
+            label = ["PRIMARY","SECONDARY","TERTIARY"][idx] if idx < 3 else f"#{idx}"
+            print(f"⚠ Already in chain at [{label}] index {idx}. Use 'sustrato remove {idx}' first.")
+            return
+
+    entry = {"provider": provider, "model": model}
+    if url: entry["url"] = url
+    if is_local: entry["local"] = True
+    chain.append(entry)
     save_config(cfg)
 
-    idx = len(cfg["chain"]) - 1
-    labels = ["PRIMARY", "SECONDARY", "TERTIARY"]
+    idx = len(chain) - 1
+    labels = ["PRIMARY","SECONDARY","TERTIARY"]
     label = labels[idx] if idx < 3 else f"#{idx}"
     url_str = f" @ {url}" if url else ""
     print(f"[{label}] {provider}/{model}{url_str} added (substrate {idx})")
 
-
 def cmd_remove(args):
     if not args:
-        print("Usage: sustrato remove <index>")
-        sys.exit(1)
+        print("Usage: sustrato remove <index>"); sys.exit(1)
     cfg = load_config()
-    try:
-        idx = int(args[0])
-    except ValueError:
-        print(f"Invalid index: {args[0]}")
-        sys.exit(1)
+    try: idx = int(args[0])
+    except ValueError: print(f"Invalid index: {args[0]}"); sys.exit(1)
     chain = cfg.get("chain", [])
     if idx < 0 or idx >= len(chain):
-        print(f"Index {idx} out of range (0-{len(chain)-1})")
-        sys.exit(1)
+        print(f"Index {idx} out of range (0-{len(chain)-1})"); sys.exit(1)
     removed = chain.pop(idx)
     save_config(cfg)
     print(f"Removed [{idx}]: {removed['provider']}/{removed['model']}")
 
-
 def cmd_list():
-    cfg = load_config()
-    state = load_state()
+    cfg = load_config(); state = load_state()
     chain = cfg.get("chain", [])
-
     if not chain:
-        print("No substrates configured.\n")
-        print("Add one: sustrato add <provider> <model>")
-        print("Example: sustrato add deepseek deepseek-v4-pro")
+        print("No substrates configured.\n\nAdd one: sustrato add <provider> <model>")
         return
-
     active = state.get("active_index", 0)
-    labels = ["PRIMARY", "SECONDARY", "TERTIARY"]
-
-    print("Substrate chain:")
-    print("─" * 55)
+    labels = ["PRIMARY","SECONDARY","TERTIARY"]
+    print("Substrate chain:"); print("─"*55)
     for i, entry in enumerate(chain):
         label = labels[i] if i < 3 else f"#{i}"
         marker = " ← ACTIVE" if i == active else ""
         url_str = f" @ {entry['url']}" if entry.get("url") else ""
         local_tag = " [LOCAL]" if entry.get("local") else ""
         print(f"  [{label}] {entry['provider']}/{entry['model']}{url_str}{local_tag}{marker}")
-
-    print("─" * 55)
-    auto = "ON" if cfg.get("auto_failover", True) else "OFF"
-    print(f"Auto-failover: {auto}")
+    print("─"*55)
+    print(f"Auto-failover: {'ON' if cfg.get('auto_failover', True) else 'OFF'}")
+    print(f"Fail threshold: {cfg.get('fail_threshold', 3)} failures")
+    f_total = sum(state.get("failures", {}).values())
+    if f_total:
+        print(f"Current failures: {f_total}")
     if state.get("last_switch"):
-        print(f"Last switch:  {state['last_switch']}")
-
+        print(f"Last switch: {state['last_switch']}")
 
 def cmd_test():
-    cfg = load_config()
-    chain = cfg.get("chain", [])
-    if not chain:
-        print("No substrates to test.")
-        return
-
+    cfg = load_config(); chain = cfg.get("chain", [])
+    if not chain: print("No substrates to test."); return
     timeout = cfg.get("health_check_timeout", 5)
-    print("Health check:")
-    print("─" * 40)
-
+    print("Health check:"); print("─"*45)
     for i, entry in enumerate(chain):
-        provider = entry["provider"]
-        model = entry["model"]
+        prov, model = entry["provider"], entry["model"]
         healthy = check_health(entry, timeout)
         status = "✓ ONLINE" if healthy else "✗ OFFLINE"
-        print(f"  [{i}] {provider}/{model}: {status}")
-
+        detail = ""
+        if not healthy and (entry.get("local") or entry.get("url")):
+            detail = " (no response from API)"
+        print(f"  [{i}] {prov}/{model}: {status}{detail}")
 
 def cmd_switch(args):
-    if not args:
-        print("Usage: sustrato switch <index>")
-        sys.exit(1)
-
-    cfg = load_config()
-    state = load_state()
-    chain = cfg.get("chain", [])
-
-    if not chain:
-        print("No substrates configured.")
-        sys.exit(1)
-
-    try:
-        idx = int(args[0])
-    except ValueError:
-        print(f"Invalid index: {args[0]}")
-        sys.exit(1)
-
+    if not args: print("Usage: sustrato switch <index>"); sys.exit(1)
+    cfg = load_config(); state = load_state(); chain = cfg.get("chain", [])
+    if not chain: print("No substrates configured."); sys.exit(1)
+    try: idx = int(args[0])
+    except ValueError: print(f"Invalid index: {args[0]}"); sys.exit(1)
     if idx < 0 or idx >= len(chain):
-        print(f"Index {idx} out of range (0-{len(chain)-1})")
-        sys.exit(1)
-
+        print(f"Index {idx} out of range (0-{len(chain)-1})"); sys.exit(1)
     old = state.get("active_index", 0)
     state["active_index"] = idx
+    state["failures"] = {}
     state["last_switch"] = datetime.now().isoformat()
     save_state(state)
-
     entry = chain[idx]
-    labels = ["primary", "secondary", "tertiary"]
+    labels = ["primary","secondary","tertiary"]
     label = labels[idx] if idx < 3 else f"substrate #{idx}"
     print(f"Switched: [{old}] → [{idx}] ({label})")
     print(f"Now using: {entry['provider']}/{entry['model']}")
     print(f"\nRestart Hermes session or /reset to apply.")
 
-
 def cmd_reset():
-    state = {"active_index": 0, "failures": {}, "last_switch": None}
+    state = {"active_index": 0, "failures": {}, "last_switch": None, "last_success": None}
     save_state(state)
     print("Reset to primary substrate. Failure counters cleared.")
 
-
 def cmd_auto(args):
-    if not args or args[0] not in ("on", "off"):
-        print("Usage: sustrato auto <on|off>")
-        sys.exit(1)
+    if not args or args[0] not in ("on","off"):
+        print("Usage: sustrato auto <on|off>"); sys.exit(1)
     cfg = load_config()
     cfg["auto_failover"] = args[0] == "on"
     save_config(cfg)
     print(f"Auto-failover: {args[0].upper()}")
 
+def cmd_providers(_args=None):
+    print("Available providers (from Hermes PROVIDER_REGISTRY):"); print("─"*55)
+    for pid, info in sorted(HERMES_PROVIDERS.items()):
+        name = info["name"]; auth = info.get("auth_type","?")
+        env_str = ", ".join(info.get("env_vars",[]))
+        if env_str: env_str = f"  [{env_str}]"
+        print(f"  {pid:<22} {name:<28} {auth}{env_str}")
+    print("─"*55); print(f"Total: {len(HERMES_PROVIDERS)} providers")
+    print(); print("Use any provider ID with: sustrato add <provider> <model>")
+
+def cmd_failures(_args=None):
+    """Show current failure state across all substrates."""
+    state = load_state(); cfg = load_config()
+    chain = cfg.get("chain", [])
+    active = state.get("active_index", 0)
+    failures = state.get("failures", {})
+    threshold = cfg.get("fail_threshold", 3)
+    print("Failure tracking:"); print("─"*45)
+    for i, entry in enumerate(chain):
+        key = str(i); count = failures.get(key, 0)
+        bar = "█" * count + "░" * (threshold - count)
+        marker = " ← ACTIVE" if i == active else ""
+        print(f"  [{i}] {entry['provider']}/{entry['model']}: [{bar}] {count}/{threshold}{marker}")
+    if state.get("last_success"):
+        print(f"  Last success: {state['last_success']}")
+
+def cmd_setup(_args=None):
+    cfg = load_config(); chain = cfg.get("chain", [])
+    print(); print("╔══════════════════════════════════════════════╗")
+    print("║   🔄  SUSTRATO SETUP — Provider Failover    ║")
+    print("╚══════════════════════════════════════════════╝"); print()
+    if chain: print(f"Current chain: {len(chain)} substrate(s)"); print()
+    # Primary
+    print("── Primary substrate (your main provider) ──")
+    print("   This is your everyday driver.")
+    provider = _prompt("   Provider", default=chain[0]["provider"] if chain else "deepseek", examples=_top_providers())
+    model = _prompt("   Model", default=chain[0]["model"] if chain else "deepseek-v4-pro", examples=["deepseek-v4-pro","claude-sonnet-4","gpt-4o"])
+    print()
+    # Secondary
+    print("── Secondary substrate (cloud fallback) ──")
+    print("   Kicks in when primary fails.")
+    add_secondary = _confirm("   Add secondary fallback?")
+    sec_provider = sec_model = None
+    if add_secondary:
+        sec_provider = _prompt("   Provider", default=chain[1]["provider"] if len(chain)>1 else "openrouter", examples=["openrouter","deepseek","anthropic"])
+        sec_model = _prompt("   Model", default=chain[1]["model"] if len(chain)>1 else "anthropic/claude-sonnet-4", examples=["anthropic/claude-sonnet-4","deepseek-v4-pro"])
+    print()
+    # Tertiary
+    print("── Tertiary substrate (local Ollama) ──")
+    print("   Runs offline. Slower but always available.")
+    add_tertiary = _confirm("   Add local Ollama fallback?")
+    ollama_url = "http://localhost:11434/v1"
+    ter_model = None
+    if add_tertiary:
+        default_model = chain[2]["model"] if len(chain)>2 else "llama3:8b"
+        ter_model = _prompt("   Ollama model", default=default_model, examples=["llama3:8b","llama3:70b","mistral:7b"])
+        ollama_url = _prompt("   URL", default="http://localhost:11434/v1")
+    print()
+    # Auto-failover
+    print("── Auto-failover ──")
+    auto = _confirm("   Enable automatic failover?", default=cfg.get("auto_failover", True))
+    threshold = 3
+    if auto:
+        threshold_str = _prompt("   Failure threshold", default="3", examples=["2","3","5"])
+        try: threshold = int(threshold_str)
+        except ValueError: threshold = 3
+    print()
+    # Build
+    new_chain = [{"provider":provider, "model":model}]
+    if add_secondary and sec_provider:
+        new_chain.append({"provider":sec_provider, "model":sec_model})
+    if add_tertiary and ter_model:
+        entry = {"provider":"ollama", "model":ter_model, "local":True}
+        if ollama_url != "http://localhost:11434/v1": entry["url"] = ollama_url
+        new_chain.append(entry)
+    cfg["chain"] = new_chain
+    cfg["auto_failover"] = auto
+    cfg["fail_threshold"] = threshold
+    save_config(cfg)
+    save_state({"active_index":0,"failures":{},"last_switch":None,"last_success":None})
+    print("── Summary ──"); print()
+    labels = ["PRIMARY","SECONDARY","TERTIARY"]
+    for i, entry in enumerate(new_chain):
+        url_str = f" @ {entry.get('url','')}" if entry.get('url') else ""
+        local_tag = " [LOCAL]" if entry.get('local') else ""
+        print(f"  [{labels[i]}] {entry['provider']}/{entry['model']}{url_str}{local_tag}")
+    print(); print(f"  Auto-failover: {'ON' if auto else 'OFF'} (threshold: {threshold})"); print()
+    print("✓ Configuration saved"); print("  Restart Hermes or /reset to activate.")
+
+def _prompt(label, default="", examples=None):
+    d = f" [{default}]" if default else ""
+    print(f"{label}{d}: ", end="", flush=True)
+    if examples: print(f"(e.g. {', '.join(examples)})"); print(f"{label}: ", end="", flush=True)
+    try:
+        v = input().strip(); return v if v else default
+    except (EOFError, KeyboardInterrupt): print(); return default
+
+def _confirm(prompt, default=True):
+    yn = "Y/n" if default else "y/N"
+    try:
+        v = input(f"{prompt} [{yn}]: ").strip().lower()
+        return default if not v else v in ("y","yes")
+    except (EOFError, KeyboardInterrupt): print(); return default
 
 def cmd_help():
-    print("""sustrato — multi-layer provider failover for Hermes Agent
+    print("""sustrato — multi-layer provider failover for Hermes Agent v1.1.0
 
 USAGE:
   sustrato add <provider> <model> [--url <endpoint>] [--local]
@@ -338,172 +395,40 @@ USAGE:
   sustrato switch <index>
   sustrato reset
   sustrato auto <on|off>
+  sustrato providers
+  sustrato failures
+  sustrato setup
 
 EXAMPLES:
   sustrato add deepseek deepseek-v4-pro
-  sustrato add openrouter anthropic/claude-sonnet-4
-  sustrato add ollama llama3:8b --local
-  sustrato providers              # list all available providers
+  sustrato add openai gpt-4o
+  sustrato add ollama deepseek-r1:8b --url http://192.168.1.17:11434/v1
   sustrato list
   sustrato test
   sustrato switch 1
+  sustrato failures
 
 CONFIG: ~/.hermes/sustrato.yaml
 STATE:  ~/.hermes/sustrato_state.json
 
 The chain is: primary (0) → secondary (1) → tertiary (2).
-Auto-failover activates after 3 consecutive failures.""")
-
-
-def cmd_setup(_args=None):
-    """Interactive setup wizard — mimics hermes setup style."""
-    cfg = load_config()
-    chain = cfg.get("chain", [])
-
-    print()
-    print("╔══════════════════════════════════════════════╗")
-    print("║   🔄  SUSTRATO SETUP — Provider Failover    ║")
-    print("╚══════════════════════════════════════════════╝")
-    print()
-
-    if chain:
-        print(f"Current chain: {len(chain)} substrate(s)")
-        print()
-
-    # Step 1: Primary
-    print("── Primary substrate (your main provider) ──")
-    print("   This is your everyday driver.")
-    provider = _prompt("   Provider", default=chain[0]["provider"] if chain else "deepseek",
-                       examples=_top_providers())
-    model = _prompt("   Model", default=chain[0]["model"] if chain else "deepseek-v4-pro",
-                    examples=["deepseek-v4-pro", "claude-sonnet-4", "gpt-4o"])
-    print()
-
-    # Step 2: Secondary fallback
-    print("── Secondary substrate (cloud fallback) ──")
-    print("   Kicks in when primary fails. Can be same/different provider.")
-    add_secondary = _confirm("   Add secondary fallback?")
-    sec_provider = sec_model = None
-    if add_secondary:
-        sec_provider = _prompt("   Provider", default=chain[1]["provider"] if len(chain) > 1 else "openrouter",
-                               examples=["openrouter", "deepseek", "anthropic"])
-        sec_model = _prompt("   Model", default=chain[1]["model"] if len(chain) > 1 else "anthropic/claude-sonnet-4",
-                            examples=["anthropic/claude-sonnet-4", "deepseek-v4-pro"])
-    print()
-
-    # Step 3: Tertiary (local)
-    print("── Tertiary substrate (local Ollama) ──")
-    print("   Runs offline. Slower but always available.")
-    add_tertiary = _confirm("   Add local Ollama fallback?")
-    ter_provider = ter_model = None
-    if add_tertiary:
-        ter_provider = "ollama"
-        default_model = chain[2]["model"] if len(chain) > 2 else "llama3:8b"
-        ter_model = _prompt("   Ollama model", default=default_model,
-                            examples=["llama3:8b", "llama3:70b", "mistral:7b", "phi3:14b"])
-        ollama_url = _prompt("   URL", default="http://localhost:11434/v1")
-    print()
-
-    # Step 4: Auto-failover
-    print("── Auto-failover ──")
-    auto = _confirm("   Enable automatic failover?",
-                     default=cfg.get("auto_failover", True))
-    print()
-
-    # Build chain
-    new_chain = []
-    new_chain.append({"provider": provider, "model": model})
-    if add_secondary and sec_provider:
-        new_chain.append({"provider": sec_provider, "model": sec_model})
-    if add_tertiary and ter_provider:
-        entry = {"provider": ter_provider, "model": ter_model, "local": True}
-        if ollama_url != "http://localhost:11434/v1":
-            entry["url"] = ollama_url
-        new_chain.append(entry)
-
-    cfg["chain"] = new_chain
-    cfg["auto_failover"] = auto
-    save_config(cfg)
-
-    # Reset state
-    state = {"active_index": 0, "failures": {}, "last_switch": None}
-    save_state(state)
-
-    print("── Summary ──")
-    print()
-    labels = ["PRIMARY", "SECONDARY", "TERTIARY"]
-    for i, entry in enumerate(new_chain):
-        label = labels[i]
-        url_str = f" @ {entry.get('url', '')}" if entry.get('url') else ""
-        local_tag = " [LOCAL]" if entry.get('local') else ""
-        print(f"  [{label}] {entry['provider']}/{entry['model']}{url_str}{local_tag}")
-
-    print()
-    print(f"  Auto-failover: {'ON' if auto else 'OFF'}")
-    print()
-    print("✓ Configuration saved to ~/.hermes/sustrato.yaml")
-    print("  Restart Hermes or /reset to activate.")
-
-
-def _prompt(label: str, default: str = "", examples: list = None) -> str:
-    """Prompt for input with default and examples."""
-    default_str = f" [{default}]" if default else ""
-    print(f"{label}{default_str}: ", end="", flush=True)
-    if examples:
-        print(f"(e.g. {', '.join(examples)})")
-        print(f"{label}: ", end="", flush=True)
-    try:
-        value = input().strip()
-        return value if value else default
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return default
-
-
-def _confirm(prompt: str, default: bool = True) -> bool:
-    """Simple Y/n confirmation."""
-    yn = "Y/n" if default else "y/N"
-    try:
-        value = input(f"{prompt} [{yn}]: ").strip().lower()
-        if not value:
-            return default
-        return value in ("y", "yes")
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return default
-
+Auto-failover activates after N consecutive failures (default: 3).""")
 
 # ── Main ──────────────────────────────────────────────────────────────
-
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] in ("help", "--help", "-h"):
-        cmd_help()
-        return
-
-    cmd = sys.argv[1]
-    args = sys.argv[2:]
-
+    if len(sys.argv) < 2 or sys.argv[1] in ("help","--help","-h"):
+        cmd_help(); return
+    cmd = sys.argv[1]; args = sys.argv[2:]
     commands = {
-        "add": cmd_add,
-        "remove": cmd_remove,
-        "list": lambda _: cmd_list(),
-        "test": lambda _: cmd_test(),
-        "switch": cmd_switch,
-        "reset": lambda _: cmd_reset(),
-        "auto": cmd_auto,
-        "providers": lambda _: cmd_providers(),
-        "setup": lambda _: cmd_setup(),
+        "add": cmd_add, "remove": cmd_remove,
+        "list": lambda _: cmd_list(), "test": lambda _: cmd_test(),
+        "switch": cmd_switch, "reset": lambda _: cmd_reset(),
+        "auto": cmd_auto, "providers": lambda _: cmd_providers(),
+        "failures": lambda _: cmd_failures(), "setup": lambda _: cmd_setup(),
         "help": lambda _: cmd_help(),
     }
-
-    if cmd in commands:
-        commands[cmd](args)
-    else:
-        print(f"Unknown command: {cmd}")
-        print()
-        cmd_help()
-        sys.exit(1)
-
+    if cmd in commands: commands[cmd](args)
+    else: print(f"Unknown command: {cmd}"); cmd_help(); sys.exit(1)
 
 if __name__ == "__main__":
     main()
