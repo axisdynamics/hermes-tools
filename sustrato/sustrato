@@ -112,6 +112,154 @@ def check_health(entry: dict, timeout: int = 5) -> bool:
     except Exception:
         return False
 
+
+def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
+    """Deep health check — tests API with credentials. Returns (bool, detail)."""
+    provider = entry.get("provider", "")
+    model = entry.get("model", "")
+    url = entry.get("url", "")
+
+    # Load API keys from .env
+    env_path = _hermes_dir() / ".env"
+    env_vars = {}
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env_vars[k.strip()] = v.strip().strip('"').strip("'")
+
+    # Provider-specific API key env vars
+    key_envs = {
+        "deepseek": ["DEEPSEEK_API_KEY"],
+        "openai": ["OPENAI_API_KEY"],
+        "openai-codex": ["OPENAI_API_KEY"],
+        "openrouter": ["OPENROUTER_API_KEY"],
+        "anthropic": ["ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"],
+        "google": ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+        "xai": ["XAI_API_KEY"],
+        "groq": ["GROQ_API_KEY"],
+        "nvidia": ["NVIDIA_API_KEY"],
+        "zai": ["GLM_API_KEY", "ZAI_API_KEY"],
+        "kimi-coding": ["KIMI_API_KEY"],
+        "minimax": ["MINIMAX_API_KEY"],
+    }
+    keys = key_envs.get(provider, [])
+    api_key = ""
+    for k in keys:
+        if env_vars.get(k):
+            api_key = env_vars[k]
+            break
+
+    # Ollama / local: already covered by basic check, but try /api/tags
+    if provider == "ollama" or "localhost" in url or "192.168" in url or "10." in url:
+        base = (url or "http://localhost:11434/v1").rstrip("/")
+        try:
+            req = urllib.request.Request(f"{base}/api/tags")
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            if resp.status == 200:
+                data = json.loads(resp.read())
+                models = [m["name"] for m in data.get("models", [])]
+                if model in models or any(model in m for m in models):
+                    return True, "model found"
+                return False, f"model '{model}' not in {models[:3]}..."
+            return False, f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP {e.code}"
+        except Exception as e:
+            return False, str(e)[:60]
+
+    if not api_key:
+        return False, "no API key found in .env"
+
+    # Test endpoints per provider
+    if provider in ("openai", "openai-codex"):
+        base = url or "https://api.openai.com/v1"
+        try:
+            req = urllib.request.Request(f"{base.rstrip('/')}/models")
+            req.add_header("Authorization", f"Bearer {api_key}")
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return resp.status == 200, f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()[:200]
+            if e.code == 401: return False, "HTTP 401 — invalid API key"
+            if e.code == 429: return False, "HTTP 429 — rate limited or quota exhausted"
+            return False, f"HTTP {e.code} — {body[:80]}"
+        except Exception as e:
+            return False, str(e)[:60]
+
+    if provider == "deepseek":
+        base = url or "https://api.deepseek.com/v1"
+        try:
+            req = urllib.request.Request(f"{base.rstrip('/')}/models")
+            req.add_header("Authorization", f"Bearer {api_key}")
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return resp.status == 200, f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()[:200]
+            if e.code == 401: return False, "HTTP 401 — invalid API key"
+            if e.code == 429: return False, "HTTP 429 — rate limited"
+            if e.code == 402: return False, "HTTP 402 — insufficient quota"
+            return False, f"HTTP {e.code} — {body[:80]}"
+        except Exception as e:
+            return False, str(e)[:60]
+
+    if provider == "openrouter":
+        base = url or "https://openrouter.ai/api/v1"
+        try:
+            req = urllib.request.Request(f"{base.rstrip('/')}/models")
+            req.add_header("Authorization", f"Bearer {api_key}")
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return resp.status == 200, f"HTTP {resp.status}"
+        except urllib.error.HTTPError as e:
+            if e.code == 401: return False, "HTTP 401 — invalid key"
+            if e.code == 402: return False, "HTTP 402 — insufficient credits"
+            return False, f"HTTP {e.code}"
+        except Exception as e:
+            return False, str(e)[:60]
+
+    if provider == "anthropic":
+        base = url or "https://api.anthropic.com"
+        try:
+            req = urllib.request.Request(f"{base.rstrip('/')}/v1/messages")
+            req.add_header("x-api-key", api_key)
+            req.add_header("anthropic-version", "2023-06-01")
+            # Don't send a real request body, just check auth
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return False, f"HTTP {resp.status} (unexpected)"
+        except urllib.error.HTTPError as e:
+            if e.code == 401: return False, "HTTP 401 — invalid API key"
+            if e.code == 429: return False, "HTTP 429 — rate limited"
+            return False, f"HTTP {e.code}"
+        except Exception as e:
+            return False, str(e)[:60]
+
+    # Generic: test connectivity only
+    return check_health(entry, timeout), "connectivity only (no deep probe)"
+
+
+def cmd_test(args=None):
+    """Health-check all substrates. Use --deep for credentialed API probe."""
+    deep = args and "--deep" in args if args else False
+    cfg = load_config(); chain = cfg.get("chain", [])
+    if not chain: print("No substrates to test."); return
+    timeout = cfg.get("health_check_timeout", 5)
+    print(f"Health check{' (DEEP — API credentials)' if deep else ''}:")
+    print("─" * 55)
+    for i, entry in enumerate(chain):
+        prov, model = entry["provider"], entry["model"]
+        if deep:
+            healthy, detail = check_health_deep(entry, timeout)
+            status = "✓ OK" if healthy else f"✗ FAIL"
+            print(f"  [{i}] {prov}/{model}: {status} — {detail}")
+        else:
+            healthy = check_health(entry, timeout)
+            status = "✓ ONLINE" if healthy else "✗ OFFLINE"
+            detail = ""
+            if not healthy and (entry.get("local") or entry.get("url")):
+                detail = " (no API response)"
+            print(f"  [{i}] {prov}/{model}: {status}{detail}")
+
 # ── Auto-failover logic ────────────────────────────────────────────────
 def record_failure():
     """Record a failure on the active substrate. Switch if threshold reached."""
@@ -232,20 +380,6 @@ def cmd_list():
         print(f"Current failures: {f_total}")
     if state.get("last_switch"):
         print(f"Last switch: {state['last_switch']}")
-
-def cmd_test():
-    cfg = load_config(); chain = cfg.get("chain", [])
-    if not chain: print("No substrates to test."); return
-    timeout = cfg.get("health_check_timeout", 5)
-    print("Health check:"); print("─"*45)
-    for i, entry in enumerate(chain):
-        prov, model = entry["provider"], entry["model"]
-        healthy = check_health(entry, timeout)
-        status = "✓ ONLINE" if healthy else "✗ OFFLINE"
-        detail = ""
-        if not healthy and (entry.get("local") or entry.get("url")):
-            detail = " (no response from API)"
-        print(f"  [{i}] {prov}/{model}: {status}{detail}")
 
 def cmd_switch(args):
     if not args: print("Usage: sustrato switch <index>"); sys.exit(1)
@@ -421,7 +555,7 @@ def main():
     cmd = sys.argv[1]; args = sys.argv[2:]
     commands = {
         "add": cmd_add, "remove": cmd_remove,
-        "list": lambda _: cmd_list(), "test": lambda _: cmd_test(),
+        "list": lambda _: cmd_list(), "test": cmd_test,
         "switch": cmd_switch, "reset": lambda _: cmd_reset(),
         "auto": cmd_auto, "providers": lambda _: cmd_providers(),
         "failures": lambda _: cmd_failures(), "setup": lambda _: cmd_setup(),
