@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+"""
+sustrato — Multi-layer provider failover CLI for Hermes Agent.
+
+Standalone CLI tool to manage substrate chains.
+Also works as a Hermes plugin for in-session slash commands.
+
+Usage:
+    sustrato add <provider> <model> [--url <endpoint>] [--local]
+    sustrato remove <index>
+    sustrato list
+    sustrato test
+    sustrato switch <index>
+    sustrato reset
+    sustrato auto <on|off>
+"""
+import json
+import os
+import socket
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import yaml
+
+CONFIG_PATH = Path.home() / ".hermes" / "sustrato.yaml"
+STATE_PATH = Path.home() / ".hermes" / "sustrato_state.json"
+
+# ── Config ────────────────────────────────────────────────────────────
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH) as f:
+            return yaml.safe_load(f) or {}
+    return {"chain": [], "auto_failover": True, "health_check_timeout": 5}
+
+def save_config(cfg: dict):
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_PATH, "w") as f:
+        yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+def load_state() -> dict:
+    if STATE_PATH.exists():
+        with open(STATE_PATH) as f:
+            return json.load(f)
+    return {"active_index": 0, "failures": {}, "last_switch": None}
+
+def save_state(state: dict):
+    with open(STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
+
+# ── Health check ──────────────────────────────────────────────────────
+
+def check_health(entry: dict, timeout: int = 5) -> bool:
+    provider = entry.get("provider", "")
+    url = entry.get("url", "")
+
+    if provider == "ollama" or "localhost" in url:
+        base = url or "http://localhost:11434/v1"
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"{base.rstrip('/')}/models")
+            urllib.request.urlopen(req, timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    endpoints = {
+        "deepseek": "api.deepseek.com",
+        "openrouter": "openrouter.ai",
+        "anthropic": "api.anthropic.com",
+        "openai": "api.openai.com",
+        "google": "generativelanguage.googleapis.com",
+        "xai": "api.x.ai",
+        "groq": "api.groq.com",
+    }
+    host = endpoints.get(provider)
+    if not host:
+        return True
+    try:
+        socket.create_connection((host, 443), timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+# ── Commands ──────────────────────────────────────────────────────────
+
+def cmd_add(args):
+    if len(args) < 2:
+        print("Usage: sustrato add <provider> <model> [--url <endpoint>] [--local]")
+        sys.exit(1)
+
+    provider = args[0]
+    model = args[1]
+    url = None
+    is_local = False
+
+    remaining = args[2:]
+    i = 0
+    while i < len(remaining):
+        if remaining[i] == "--url" and i + 1 < len(remaining):
+            url = remaining[i + 1]
+            i += 2
+        elif remaining[i] == "--local":
+            is_local = True
+            i += 1
+        else:
+            i += 1
+
+    if is_local and not url:
+        url = "http://localhost:11434/v1"
+
+    cfg = load_config()
+    entry = {"provider": provider, "model": model}
+    if url:
+        entry["url"] = url
+    if is_local:
+        entry["local"] = True
+
+    cfg.setdefault("chain", []).append(entry)
+    save_config(cfg)
+
+    idx = len(cfg["chain"]) - 1
+    labels = ["PRIMARY", "SECONDARY", "TERTIARY"]
+    label = labels[idx] if idx < 3 else f"#{idx}"
+    url_str = f" @ {url}" if url else ""
+    print(f"[{label}] {provider}/{model}{url_str} added (substrate {idx})")
+
+
+def cmd_remove(args):
+    if not args:
+        print("Usage: sustrato remove <index>")
+        sys.exit(1)
+    cfg = load_config()
+    try:
+        idx = int(args[0])
+    except ValueError:
+        print(f"Invalid index: {args[0]}")
+        sys.exit(1)
+    chain = cfg.get("chain", [])
+    if idx < 0 or idx >= len(chain):
+        print(f"Index {idx} out of range (0-{len(chain)-1})")
+        sys.exit(1)
+    removed = chain.pop(idx)
+    save_config(cfg)
+    print(f"Removed [{idx}]: {removed['provider']}/{removed['model']}")
+
+
+def cmd_list():
+    cfg = load_config()
+    state = load_state()
+    chain = cfg.get("chain", [])
+
+    if not chain:
+        print("No substrates configured.\n")
+        print("Add one: sustrato add <provider> <model>")
+        print("Example: sustrato add deepseek deepseek-v4-pro")
+        return
+
+    active = state.get("active_index", 0)
+    labels = ["PRIMARY", "SECONDARY", "TERTIARY"]
+
+    print("Substrate chain:")
+    print("─" * 55)
+    for i, entry in enumerate(chain):
+        label = labels[i] if i < 3 else f"#{i}"
+        marker = " ← ACTIVE" if i == active else ""
+        url_str = f" @ {entry['url']}" if entry.get("url") else ""
+        local_tag = " [LOCAL]" if entry.get("local") else ""
+        print(f"  [{label}] {entry['provider']}/{entry['model']}{url_str}{local_tag}{marker}")
+
+    print("─" * 55)
+    auto = "ON" if cfg.get("auto_failover", True) else "OFF"
+    print(f"Auto-failover: {auto}")
+    if state.get("last_switch"):
+        print(f"Last switch:  {state['last_switch']}")
+
+
+def cmd_test():
+    cfg = load_config()
+    chain = cfg.get("chain", [])
+    if not chain:
+        print("No substrates to test.")
+        return
+
+    timeout = cfg.get("health_check_timeout", 5)
+    print("Health check:")
+    print("─" * 40)
+
+    for i, entry in enumerate(chain):
+        provider = entry["provider"]
+        model = entry["model"]
+        healthy = check_health(entry, timeout)
+        status = "✓ ONLINE" if healthy else "✗ OFFLINE"
+        print(f"  [{i}] {provider}/{model}: {status}")
+
+
+def cmd_switch(args):
+    if not args:
+        print("Usage: sustrato switch <index>")
+        sys.exit(1)
+
+    cfg = load_config()
+    state = load_state()
+    chain = cfg.get("chain", [])
+
+    if not chain:
+        print("No substrates configured.")
+        sys.exit(1)
+
+    try:
+        idx = int(args[0])
+    except ValueError:
+        print(f"Invalid index: {args[0]}")
+        sys.exit(1)
+
+    if idx < 0 or idx >= len(chain):
+        print(f"Index {idx} out of range (0-{len(chain)-1})")
+        sys.exit(1)
+
+    old = state.get("active_index", 0)
+    state["active_index"] = idx
+    state["last_switch"] = datetime.now().isoformat()
+    save_state(state)
+
+    entry = chain[idx]
+    labels = ["primary", "secondary", "tertiary"]
+    label = labels[idx] if idx < 3 else f"substrate #{idx}"
+    print(f"Switched: [{old}] → [{idx}] ({label})")
+    print(f"Now using: {entry['provider']}/{entry['model']}")
+    print(f"\nRestart Hermes session or /reset to apply.")
+
+
+def cmd_reset():
+    state = {"active_index": 0, "failures": {}, "last_switch": None}
+    save_state(state)
+    print("Reset to primary substrate. Failure counters cleared.")
+
+
+def cmd_auto(args):
+    if not args or args[0] not in ("on", "off"):
+        print("Usage: sustrato auto <on|off>")
+        sys.exit(1)
+    cfg = load_config()
+    cfg["auto_failover"] = args[0] == "on"
+    save_config(cfg)
+    print(f"Auto-failover: {args[0].upper()}")
+
+
+def cmd_help():
+    print("""sustrato — multi-layer provider failover for Hermes Agent
+
+USAGE:
+  sustrato add <provider> <model> [--url <endpoint>] [--local]
+  sustrato remove <index>
+  sustrato list
+  sustrato test
+  sustrato switch <index>
+  sustrato reset
+  sustrato auto <on|off>
+
+EXAMPLES:
+  sustrato add deepseek deepseek-v4-pro
+  sustrato add openrouter anthropic/claude-sonnet-4
+  sustrato add ollama llama3:8b --local
+  sustrato list
+  sustrato test
+  sustrato switch 1
+
+CONFIG: ~/.hermes/sustrato.yaml
+STATE:  ~/.hermes/sustrato_state.json
+
+The chain is: primary (0) → secondary (1) → tertiary (2).
+Auto-failover activates after 3 consecutive failures.""")
+
+
+# ── Main ──────────────────────────────────────────────────────────────
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] in ("help", "--help", "-h"):
+        cmd_help()
+        return
+
+    cmd = sys.argv[1]
+    args = sys.argv[2:]
+
+    commands = {
+        "add": cmd_add,
+        "remove": cmd_remove,
+        "list": lambda _: cmd_list(),
+        "test": lambda _: cmd_test(),
+        "switch": cmd_switch,
+        "reset": lambda _: cmd_reset(),
+        "auto": cmd_auto,
+        "help": lambda _: cmd_help(),
+    }
+
+    if cmd in commands:
+        commands[cmd](args)
+    else:
+        print(f"Unknown command: {cmd}")
+        print()
+        cmd_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

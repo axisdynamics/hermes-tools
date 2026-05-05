@@ -1,0 +1,11 @@
+manifest_version: 1
+name: sustrato
+version: 1.0.0
+description: Multi-layer provider failover — chain fallback substrates (DeepSeek → OpenRouter → Ollama). When the primary fails, the next one takes over.
+author: Marco Torres Y. — Axis Dynamics · Hermes VEX
+license: MIT
+provides_hooks:
+  - pre_llm_call
+  - on_session_start
+requires:
+  hermes: ">=0.11.0"
