@@ -1,0 +1,8 @@
+manifest_version: 1
+name: memovex
+version: 2.1.0
+description: Memovex 2.1 persistent memory for Hermes — prefetch context (with smart formatting, dedup, adaptive thresholds) before each turn, store turns on session end. Connects to local Memovex API (port 7914).
+author: Plaxius / Marco Torres Yevenes
+provides_hooks:
+  - pre_llm_call
+  - on_session_finalize

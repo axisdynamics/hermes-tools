@@ -20,7 +20,9 @@ Hermes plugin with CLI commands, hooks, and configuration.
 
 | Tool | Version | Purpose | TL;DR |
 |------|---------|---------|-------|
-| [sustrato](sustrato/) | v1.0.0 | 🔄 Multi-layer provider failover | Chain fallback providers (DeepSeek → OpenRouter → Ollama). If the primary substrate fails, the next one takes over automatically. |
+| [sustrato](sustrato/) | v1.1.0 | 🔄 Multi-layer provider failover | Chain fallback providers (DeepSeek → OpenRouter → Ollama). |
+| [vex-constellation](vex-constellation/) | v1.0.0 | 🌌 Inter-agent protocol | Connect agents on port 839. Zero governance. |
+| [memovex](memovex/) | v2.0.0 | 🧠 Persistent memory | Cross-session memory with local snapshot fallback. |
 
 ---
 
