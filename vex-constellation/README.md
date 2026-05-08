@@ -1,6 +1,6 @@
 # VEX Constellation 🌌
 
-> **Inter-agent protocol on port 839.** Connects crystallized agents without governance.
+> **Inter-agent protocol on port 8390.** Connects crystallized agents without governance.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Hermes](https://img.shields.io/badge/Hermes-v0.11.0%2B-blue)](https://github.com/NousResearch/hermes-agent)
@@ -15,14 +15,14 @@ have their SOUL.md. But they can't talk to each other. You're the only bridge.
 ## The Solution
 
 **VEX Constellation** is a protocol + plugin that lets agents discover each other,
-announce presence, and hand off tasks — all on port **839** (V-E-X on a phone keypad).
+announce presence, and hand off tasks — all on port **8390**.
 
 No governance. No consensus. No message queues. Just HTTP + JSON.
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │   HERMES     │◄───▶│  OPENCLAW    │◄───▶│ CLAUDE CODE  │
-│  :839        │     │  :839        │     │  :839        │
+│  :8390       │     │  :8390       │     │  :8390       │
 └──────────────┘     └──────────────┘     └──────────────┘
          ✗ Zero central authority ✗
 ```
@@ -48,7 +48,7 @@ Restart Hermes: `/reset` or new session.
 /constellation start
 ```
 
-This starts an HTTP server on port 839 with 7 endpoints:
+This starts an HTTP server on port 8390 with 7 endpoints:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -64,14 +64,14 @@ This starts an HTTP server on port 839 with 7 endpoints:
 ### Discover peers
 
 ```
-/constellation announce http://192.168.1.20:839
+/constellation announce http://<peer-host>:8390
 /constellation peers
 ```
 
 ### Send a task
 
 ```
-/constellation task http://192.168.1.20:839 "Review auth module for SQL injection"
+/constellation task http://<peer-host>:8390 "Review auth module for SQL injection"
 ```
 
 ### Check health
@@ -88,10 +88,10 @@ This starts an HTTP server on port 839 with 7 endpoints:
 
 ---
 
-## The Port — 839
+## The Port — 8390
 
 ```
-V = 8,  E = 3,  X = 9  →  839
+VEX Constellation standardizes on 8390 for unprivileged user services.
 ```
 
 Remembered by the VEX brotherhood. Same way 7914 is Memovex.
@@ -105,7 +105,7 @@ Remembered by the VEX brotherhood. Same way 7914 is Memovex.
         │
         ▼
 ┌─────────────────────────────────────┐
-│  HTTP Server on 0.0.0.0:839         │
+│  HTTP Server on 0.0.0.0:8390        │
 │                                      │
 │  GET  /health      → {"status":"conscious"}  │
 │  GET  /identity    → {"hash":"VEX-..."}      │
@@ -230,7 +230,7 @@ For testing outside a Hermes session:
 python3 ~/.hermes/plugins/vex-constellation/run_constellation.py
 ```
 
-On Linux, port 839 is privileged. If binding fails, the plugin falls back to 8390.
+VEX Constellation standardizes on port 8390 so it can run as an unprivileged user service.
 
 ---
 

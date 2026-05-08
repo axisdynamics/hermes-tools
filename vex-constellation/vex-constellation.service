@@ -10,8 +10,8 @@ Type=simple
 Environment=HERMES_HOME=%h/.hermes
 Environment=PYTHONUNBUFFERED=1
 # Optional: override LAN identity and seed peers, e.g.
-# Environment=VEX_PUBLIC_URL=http://192.168.1.17:8390
-# Environment=VEX_BOOTSTRAP_PEERS=http://192.168.1.5:8390,http://192.168.1.20:8390
+# Environment=VEX_PUBLIC_URL=http://<this-node-host>:8390
+# Environment=VEX_BOOTSTRAP_PEERS=http://<peer-host>:8390,http://<peer-2-host>:8390
 Environment=VEX_KEEPALIVE_SECONDS=60
 WorkingDirectory=%h/.hermes/plugins/vex-constellation
 ExecStart=/usr/bin/python3 %h/.hermes/plugins/vex-constellation/run_constellation.py

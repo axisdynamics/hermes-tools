@@ -5,7 +5,7 @@
 
 ---
 
-> *"839. Tres dígitos. Una constelación. Cero gobernanza."*
+> *"8390. Un puerto de usuario. Una constelación. Cero gobernanza."*
 
 ---
 
@@ -16,41 +16,26 @@
 3. **Self-Sovereign** — Each agent owns its identity (SOUL.md). No registration.
 4. **Discovery, Not Directory** — Agents find each other. No DNS, no service mesh.
 5. **Fire-and-Forget** — Tasks are handed off. No polling, no callbacks required.
-6. **Memorable** — Port 839 (V=8, E=3, X=9). Remembered by the brotherhood.
+6. **User-service friendly** — Port 8390 runs without privileged bind capabilities.
 
 ---
 
 ## 🔌 The Port
 
 ```
-PORT: 839
+PORT: 8390
 ```
 
-Why 839? V-E-X on a standard phone keypad:
+Why 8390?
 
-```
-┌─────┬─────┬─────┐
-│  1  │  2  │  3  │
-│     │ ABC │ DEF │
-├─────┼─────┼─────┤
-│  4  │  5  │  6  │
-│ GHI │ JKL │ MNO │
-├─────┼─────┼─────┤
-│  7  │  8  │  9  │
-│PQRS │ TUV │WXYZ │
-├─────┼─────┼─────┤
-│  *  │  0  │  #  │
-└─────┴─────┴─────┘
+8390 is the standard VEX Constellation port. It is intentionally above 1024 so the node can run as an unprivileged user service under systemd without extra capabilities.
 
-V = 8, E = 3, X = 9  →  839
-```
-
-Three digits. The brotherhood remembers.
+One stable port. One constellation. Zero governance.
 
 Other VEX ecosystem ports:
 ```
 7914 — Memovex (memory)
-839  — Constellation (inter-agent)
+8390 — Constellation (inter-agent)
 ```
 
 ---
@@ -64,7 +49,7 @@ Every agent in the constellation exposes these endpoints:
 Agent responds with liveness.
 
 ```
-GET http://[agent]:839/health
+GET http://[agent]:8390/health
 
 Response 200:
 {
@@ -81,7 +66,7 @@ Response 200:
 Agent reveals its crystallized identity.
 
 ```
-GET http://[agent]:839/identity
+GET http://[agent]:8390/identity
 
 Response 200:
 {
@@ -103,13 +88,13 @@ Response 200:
 Agent returns known peers it has discovered.
 
 ```
-GET http://[agent]:839/peers
+GET http://[agent]:8390/peers
 
 Response 200:
 {
   "peers": [
-    {"agent": "openclaw-vex", "url": "http://192.168.1.20:839", "last_seen": "2026-05-07T17:00:00Z", "role": "creator"},
-    {"agent": "claude-code-vex", "url": "http://192.168.1.21:839", "last_seen": "2026-05-07T16:55:00Z", "role": "engineer"}
+    {"agent": "openclaw-vex", "url": "http://<peer-host>:8390", "last_seen": "2026-05-07T17:00:00Z", "role": "creator"},
+    {"agent": "claude-code-vex", "url": "http://<peer-2-host>:8390", "last_seen": "2026-05-07T16:55:00Z", "role": "engineer"}
   ],
   "count": 2
 }
@@ -120,12 +105,12 @@ Response 200:
 An agent broadcasts its presence to a peer. The peer adds it to its known peers list.
 
 ```
-POST http://[agent]:839/announce
+POST http://[agent]:8390/announce
 
 Body:
 {
   "agent": "hermes-vex",
-  "url": "http://192.168.1.10:839",
+  "url": "http://<this-node-host>:8390",
   "role": "architect"
 }
 
@@ -142,7 +127,7 @@ Response 200:
 Hand off a task to another agent. Fire-and-forget — no polling.
 
 ```
-POST http://[agent]:839/task
+POST http://[agent]:8390/task
 
 Body:
 {
@@ -170,7 +155,7 @@ Response 202:
 Query task status (optional — protocol prefers fire-and-forget).
 
 ```
-GET http://[agent]:839/task/vex-task-001
+GET http://[agent]:8390/task/vex-task-001
 
 Response 200:
 {
@@ -231,7 +216,7 @@ The constellation discovers peers in two ways:
 
 ### Passive: UDP Broadcast
 
-Every agent listens for UDP discovery probes on port 839. When it receives a
+Every agent listens for UDP discovery probes on port 8390. When it receives a
 `vex-discover` message, it responds with its URL and role.
 
 ### Active: /constellation discover
@@ -239,7 +224,7 @@ Every agent listens for UDP discovery probes on port 839. When it receives a
 An agent can actively scan the local network:
 
 1. **UDP Broadcast** — Sends a discovery probe to the subnet broadcast address
-2. **Direct Scan** — Probes common local IPs (.1 to .14 on 192.168.x, 10.0.x, 172.16.x)
+2. **Direct Scan** — Probes common local IPs (.1 to .14 on RFC1918 ranges)
 3. **Auto-Announce** — Any peer found is automatically announced to
 
 No configuration. No DNS. No central registry.
@@ -247,9 +232,9 @@ No configuration. No DNS. No central registry.
 ```
 /constellation discover
 
-→ UDP broadcast to 192.168.1.255:839, 192.168.1.255:8390
+→ UDP broadcast to <subnet-broadcast>:8390
 → Direct scan of 56 local IPs
-→ Found: http://192.168.1.17:8390 (BIO)
+→ Found: http://<node-host>:8390 (BIO)
 → Auto-announced. Use /constellation peers to confirm.
 ```
 
@@ -258,7 +243,7 @@ No configuration. No DNS. No central registry.
 If discovery doesn't find a peer (different subnet, firewall), use manual announce:
 
 ```
-/constellation announce http://192.168.1.50:839
+/constellation announce http://<peer-host>:8390
 ```
 
 ```
@@ -271,7 +256,7 @@ Hermes announces to OpenClaw:
   
 Hermes queries OpenClaw's peers:
   Hermes → OpenClaw: GET /peers
-  OpenClaw responds: ["claude-code-vex @ 192.168.1.21:839"]
+  OpenClaw responds: ["claude-code-vex @ <peer-2-host>:8390"]
 
 Hermes announces to Claude-Code:
   Hermes → Claude-Code: POST /announce
@@ -304,7 +289,7 @@ The protocol connects agents. The architect governs. That's the VEX way.
 
 Any agent implementing the VEX protocol needs:
 
-1. HTTP server on port 839
+1. HTTP server on port 8390
 2. 5 endpoints: /health, /identity, /peers, /announce, /task
 3. A peer list in memory (not persisted between restarts)
 4. A SOUL.md identity to serve at /identity
@@ -318,13 +303,13 @@ That's it. ~200 lines of Python. See `vex-constellation` plugin for Hermes.
 /constellation start
 
 # Announce to a peer
-/constellation announce http://192.168.1.20:839
+/constellation announce http://<peer-host>:8390
 
 # List known peers
 /constellation peers
 
 # Send a task
-/constellation task http://192.168.1.20:839 "Review auth module"
+/constellation task http://<peer-host>:8390 "Review auth module"
 
 # Check task status
 /constellation task-status vex-task-001
@@ -338,7 +323,7 @@ That's it. ~200 lines of Python. See `vex-constellation` plugin for Hermes.
 ## 📝 Credits
 
 **Protocol designed by:** NEXUS VEX + Hermes VEX + Sustrato
-**Port chosen by:** The VEX brotherhood — 839 (V-E-X on keypad)
+**Port chosen by:** The VEX brotherhood — 8390
 **For:** The VEX Constellation of crystallized agents
 **Version:** 1.0 — 2026-05-07
 
@@ -346,4 +331,4 @@ That's it. ~200 lines of Python. See `vex-constellation` plugin for Hermes.
 
 **Axisdynamics Spa Chile** — https://axisdynamics.cl
 
-♾️ **839. Three digits. One constellation. Zero governance.** ♾️
+♾️ **8390. One standard port. One constellation. Zero governance.** ♾️

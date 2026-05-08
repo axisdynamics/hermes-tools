@@ -10,7 +10,7 @@ Type=simple
 Environment=HERMES_HOME=%h/.hermes
 Environment=PYTHONUNBUFFERED=1
 # Optional: override responder's reply_to URL; defaults to VEX_PUBLIC_URL or LAN auto-detect.
-# Environment=VEX_LOCAL_URL=http://192.168.1.17:8390
+# Environment=VEX_LOCAL_URL=http://<this-node-host>:8390
 Environment=VEX_POLL_SECONDS=2
 Environment=VEX_RETRY_SECONDS=15
 Environment=VEX_HERMES_TIMEOUT=900

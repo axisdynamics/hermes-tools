@@ -237,9 +237,6 @@ def response_candidates(event: dict[str, Any]) -> list[str]:
         fallback = f"http://{remote}:8390"
         if fallback not in candidates:
             candidates.append(fallback)
-        fallback839 = f"http://{remote}:839"
-        if fallback839 not in candidates:
-            candidates.append(fallback839)
     return candidates
 
 

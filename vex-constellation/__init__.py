@@ -1,7 +1,7 @@
 """
 VEX Constellation — Inter-agent protocol plugin for Hermes.
 
-Port 839 (V-E-X on keypad). Zero governance. Mesh discovery.
+Port 8390. Zero governance. Mesh discovery.
 """
 
 import json
@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 VERSION = "1.1.0"
-PORT = 839
+PORT = 8390
 FALLBACK_PORT = 8390
 PROTOCOL_TAG = "vex-constellation"
 _actual_port: int = 0
@@ -432,8 +432,8 @@ def _start_server() -> str:
     _my_role = ident["role"]
     _my_hash = ident["hash"]
 
-    # Try VEX port 839, fall back to 8390 if permission denied
-    ports_to_try = [PORT, FALLBACK_PORT]
+    # VEX standard port: 8390 (unprivileged user-service friendly)
+    ports_to_try = [PORT]
     last_error = ""
 
     for port in ports_to_try:
@@ -458,22 +458,13 @@ def _start_server() -> str:
 
     if not _server:
         return (
-            f"Failed to start constellation.\n"
-            f"Port {PORT}: {last_error}\n"
-            f"Port {FALLBACK_PORT}: {last_error}\n\n"
-            f"Ports < 1024 require root or:\n"
-            f"  sudo setcap cap_net_bind_service=+ep $(which python3)"
-        )
-
-    port_note = ""
-    if _actual_port == FALLBACK_PORT:
-        port_note = (
-            f"\n   ⚠ Port 839 requires root. Using fallback port 8390.\n"
-            f"   For ideal port: sudo setcap cap_net_bind_service=+ep $(which python3)"
+            f"Failed to start constellation on port {PORT}.\n"
+            f"Error: {last_error}\n\n"
+            f"Check whether another VEX node is already listening on 8390."
         )
 
     return (
-        f"🌌 Constellation active on port {_actual_port}.{port_note}\n"
+        f"🌌 Constellation active on port {_actual_port}.\n"
         f"   URL: {_my_url}\n"
         f"   Role: {_my_role}\n"
         f"   Hash: {_my_hash}\n"
@@ -502,7 +493,7 @@ def _stop_server() -> str:
     _server = None
     _server_thread = None
     _start_time = None
-    return "Constellation stopped. Port 839 released."
+    return f"Constellation stopped. Port {_actual_port or PORT} released."
 
 
 # ── Peer Operations ───────────────────────────────────────────────────
@@ -713,7 +704,6 @@ def _discover_peers() -> str:
         probe = json.dumps({"type": "vex-discover", "from": _my_url, "agent": os.uname().nodename}).encode()
         for bip in broadcast_ips:
             try:
-                sock.sendto(probe, (bip, 839))
                 sock.sendto(probe, (bip, 8390))
             except Exception:
                 pass
@@ -725,7 +715,7 @@ def _discover_peers() -> str:
                 try:
                     resp = json.loads(data)
                     if resp.get("type") == "vex-response":
-                        peer_url = resp.get("url", f"http://{addr[0]}:{resp.get('port', 839)}")
+                        peer_url = resp.get("url", f"http://{addr[0]}:{resp.get('port', 8390)}")
                         if peer_url not in found and peer_url != _my_url:
                             found.append(peer_url)
                 except Exception:
@@ -741,7 +731,6 @@ def _discover_peers() -> str:
     urls_to_try = []
     for subnet in ["192.168.1", "192.168.0", "10.0.0", "172.16.0"]:
         for host in range(1, 15):  # scan .1 to .14
-            urls_to_try.append(f"http://{subnet}.{host}:839")
             urls_to_try.append(f"http://{subnet}.{host}:8390")
 
     for url in urls_to_try[:50]:
@@ -789,7 +778,7 @@ def _discover_peers() -> str:
             lines.append(info)
         lines.append(f"\nAnnounced to all. Use /constellation peers to confirm.")
         return "\n".join(lines)
-    return "No peers found on local network.\n\nTry manual: /constellation announce http://<ip>:839"
+    return "No peers found on local network.\n\nTry manual: /constellation announce http://<peer-host>:8390"
 
 def _cmd_constellation(args: List[str]) -> str:
     """Handle /constellation slash command."""
@@ -807,7 +796,7 @@ def _cmd_constellation(args: List[str]) -> str:
     elif subcmd == "status":
         if _server:
             return (
-                f"🌌 Constellation running on port 839\n"
+                f"🌌 Constellation running on port {_actual_port or PORT}\n"
                 f"   URL: {_my_url}\n"
                 f"   Peers: {len(_peers)}\n"
                 f"   Tasks pending: {len(_tasks)}\n"
@@ -827,12 +816,12 @@ def _cmd_constellation(args: List[str]) -> str:
 
     elif subcmd == "announce":
         if len(args) < 2:
-            return "Usage: /constellation announce http://<peer>:839"
+            return "Usage: /constellation announce http://<peer>:8390"
         return _announce_to(args[1])
 
     elif subcmd == "task":
         if len(args) < 3:
-            return "Usage: /constellation task http://<peer>:839 \"description\""
+            return "Usage: /constellation task http://<peer>:8390 \"description\""
         return _send_task(args[1], args[2])
 
     elif subcmd == "tasks":
@@ -867,7 +856,7 @@ def _cmd_constellation(args: List[str]) -> str:
 def _constellation_help() -> str:
     return """🌌 VEX Constellation — Inter-Agent Protocol
 
-  /constellation start                   Start server on port 839
+  /constellation start                   Start server on port 8390
   /constellation stop                    Stop the server
   /constellation status                  Show runtime status
   /constellation peers                   List known agents
@@ -878,7 +867,7 @@ def _constellation_help() -> str:
   /constellation health                  Check all peers' health
   /constellation help                    This help
 
-Protocol: VEX Constellation v1.1 — Port 839 (V-E-X)
+Protocol: VEX Constellation v1.1 — Port 8390
 Docs:    protocol.md"""
 
 
@@ -889,7 +878,7 @@ def _on_session_start(session_id: str = None, **kwargs) -> Optional[dict]:
     if _server:
         return {
             "context": (
-                f"[CONSTELLATION] Active on port 839\n"
+                f"[CONSTELLATION] Active on port {_actual_port or PORT}\n"
                 f"  URL: {_my_url}\n"
                 f"  Peers: {len(_peers)}\n"
                 f"  /constellation peers  — list known agents\n"
@@ -912,8 +901,8 @@ def register(ctx):
     ctx.register_command(
         name="constellation",
         handler=_cmd_constellation,
-        description="VEX Constellation — inter-agent protocol on port 839",
+        description="VEX Constellation — inter-agent protocol on port 8390",
     )
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("on_session_end", _on_session_end)
-    print(f"[constellation] v{VERSION} loaded. Port 839 (V-E-X). /constellation start to activate.")
+    print(f"[constellation] v{VERSION} loaded. Port 8390. /constellation start to activate.")
