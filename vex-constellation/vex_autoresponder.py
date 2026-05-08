@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import subprocess
 import time
 import urllib.parse
@@ -26,7 +27,26 @@ PENDING = STATE_DIR / "outbox-pending.jsonl"
 DELIVERED = STATE_DIR / "outbox-delivered.jsonl"
 STATE = STATE_DIR / "autoresponder-state.json"
 LOG = STATE_DIR / "autoresponder.log"
-LOCAL_REPLY_URL = os.environ.get("VEX_LOCAL_URL", "http://127.0.0.1:8390")
+
+
+def lan_reply_url() -> str:
+    configured = os.environ.get("VEX_LOCAL_URL") or os.environ.get("VEX_PUBLIC_URL")
+    if configured:
+        return configured.strip().rstrip("/")
+    port = os.environ.get("VEX_PORT", "8390")
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        sock.close()
+        if ip and not ip.startswith("127."):
+            return f"http://{ip}:{port}"
+    except Exception:
+        pass
+    return f"http://127.0.0.1:{port}"
+
+
+LOCAL_REPLY_URL = lan_reply_url()
 DEFAULT_TOOLSETS = os.environ.get(
     "VEX_AUTORESPONDER_TOOLSETS",
     "terminal,file,web,skills,memory,session_search",

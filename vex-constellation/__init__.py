@@ -26,6 +26,10 @@ _HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
 _STATE_DIR = _HERMES_HOME / "vex-constellation"
 _INBOX_PATH = _STATE_DIR / "inbox.jsonl"
 _OUTBOX_PATH = _STATE_DIR / "outbox.jsonl"
+_PEERS_PATH = _STATE_DIR / "network-map.json"
+_PUBLIC_URL_ENV = os.environ.get("VEX_PUBLIC_URL", "").strip()
+_BOOTSTRAP_PEERS = [p.strip().rstrip("/") for p in os.environ.get("VEX_BOOTSTRAP_PEERS", "").split(",") if p.strip()]
+_KEEPALIVE_SECONDS = int(os.environ.get("VEX_KEEPALIVE_SECONDS", "60"))
 
 
 def _append_jsonl(path: Path, obj: dict) -> None:
@@ -39,10 +43,188 @@ def _append_jsonl(path: Path, obj: dict) -> None:
         pass
 
 
+def _load_jsonl(path: Path) -> List[dict]:
+    """Best-effort JSONL loader for surfacing worker processing state."""
+    if not path.exists():
+        return []
+    rows: List[dict] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                continue
+    except Exception:
+        return []
+    return rows
+
+
+def _worker_status_index() -> Dict[str, Dict[str, Any]]:
+    """Map task_id -> autonomous worker status from outbox/delivery logs.
+
+    The HTTP node accepts tasks synchronously, while vex_autoresponder.py
+    processes them asynchronously. Without this index /tasks can make already
+    processed peer tasks look stuck as status=received.
+    """
+    index: Dict[str, Dict[str, Any]] = {}
+    for row in _load_jsonl(_OUTBOX_PATH):
+        task = row.get("task", {}) if isinstance(row, dict) else {}
+        task_id = task.get("task_id")
+        if not task_id:
+            continue
+        result = row.get("result", {}) if isinstance(row.get("result"), dict) else {}
+        reply = row.get("reply")
+        delivered = isinstance(reply, dict) and bool(reply.get("sent"))
+        queued = isinstance(reply, dict) and bool(reply.get("queued"))
+        index[str(task_id)] = {
+            "status": "delivered" if delivered else ("queued" if queued else "processed"),
+            "processed_at": row.get("processed_at"),
+            "worker_ok": result.get("ok"),
+            "worker_mode": result.get("mode"),
+            "reply": reply,
+        }
+    delivered_path = _STATE_DIR / "outbox-delivered.jsonl"
+    for row in _load_jsonl(delivered_path):
+        task_id = row.get("task_id") if isinstance(row, dict) else None
+        if not task_id:
+            continue
+        current = index.setdefault(str(task_id), {})
+        current["status"] = "delivered"
+        current["delivery"] = row.get("delivery")
+    return index
+
+
+def _decorate_task_status(task: Dict[str, Any], status_index: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    decorated = dict(task)
+    task_id = str(decorated.get("task_id") or "")
+    worker = status_index.get(task_id)
+    if worker:
+        decorated.update({k: v for k, v in worker.items() if v is not None})
+    return decorated
+
+
+def _all_known_tasks() -> Dict[str, Dict[str, Any]]:
+    """Merge in-memory tasks with persisted inbox so /tasks survives restarts."""
+    tasks: Dict[str, Dict[str, Any]] = {}
+    for event in _load_jsonl(_INBOX_PATH):
+        task = event.get("task") if isinstance(event, dict) else None
+        if isinstance(task, dict) and task.get("task_id"):
+            tasks[str(task["task_id"])] = task
+    tasks.update(_tasks)
+    return tasks
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_url(url: str) -> str:
+    return str(url or "").strip().rstrip("/")
+
+
+def _lan_ip() -> str:
+    """Return the preferred LAN IPv4 for routable peer reply_to/public URL."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ip = sock.getsockname()[0]
+        sock.close()
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    try:
+        ip = socket.gethostbyname(socket.gethostname())
+        if ip:
+            return ip
+    except Exception:
+        pass
+    return "127.0.0.1"
+
+
+def _public_url_for_port(port: int) -> str:
+    if _PUBLIC_URL_ENV:
+        return _normalize_url(_PUBLIC_URL_ENV)
+    return f"http://{_lan_ip()}:{port}"
+
+
+def _load_peer_map() -> Dict[str, Dict[str, Any]]:
+    if not _PEERS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(_PEERS_PATH.read_text(encoding="utf-8"))
+        peers = data.get("peers", {}) if isinstance(data, dict) else {}
+        return peers if isinstance(peers, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_peer_map() -> None:
+    try:
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "updated_at": _now_iso(),
+            "self": {"agent": os.uname().nodename, "url": _my_url, "role": _my_role, "hash": _my_hash, "port": _actual_port},
+            "keepalive_seconds": _KEEPALIVE_SECONDS,
+            "peers": _peers,
+        }
+        tmp = _PEERS_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_PEERS_PATH)
+    except Exception:
+        pass
+
+
+def _peer_key(info: Dict[str, Any]) -> str:
+    return str(info.get("hash") or info.get("url") or info.get("agent") or f"peer-{len(_peers)+1}")
+
+
+def _upsert_peer(info: Dict[str, Any]) -> str:
+    url = _normalize_url(str(info.get("url", "")))
+    if not url or url == _my_url:
+        return ""
+    merged = dict(info)
+    merged["url"] = url
+    merged.setdefault("agent", "unknown")
+    merged.setdefault("role", "agent")
+    merged.setdefault("trusted", not _CONSTELLATION_KEY)
+    merged["last_seen"] = merged.get("last_seen") or _now_iso()
+    key = _peer_key(merged)
+
+    # De-duplicate records that started as bootstrap URL entries and later
+    # gained a stable identity hash from /identity or /announce.
+    for existing_key, existing in list(_peers.items()):
+        if existing_key == key:
+            continue
+        same_url = _normalize_url(str(existing.get("url", ""))) == url
+        same_hash = merged.get("hash") and existing.get("hash") == merged.get("hash")
+        if same_url or same_hash:
+            base = _peers.pop(existing_key)
+            base.update({k: v for k, v in merged.items() if v is not None and v != ""})
+            merged = base
+            key = _peer_key(merged)
+            break
+
+    existing = _peers.get(key, {})
+    existing.update({k: v for k, v in merged.items() if v is not None and v != ""})
+    _peers[key] = existing
+    _save_peer_map()
+    return key
+
+
+def _load_peers_into_memory() -> None:
+    _peers.update(_load_peer_map())
+    for url in _BOOTSTRAP_PEERS:
+        _upsert_peer({"url": url, "agent": "bootstrap-peer", "role": "peer", "trusted": True, "source": "bootstrap"})
+
+
 # ── Runtime State ─────────────────────────────────────────────────────
 _server: Optional[HTTPServer] = None
 _server_thread: Optional[threading.Thread] = None
-_peers: Dict[str, Dict[str, Any]] = {}   # hash → {url, agent, role, trusted, ...}
+_keepalive_thread: Optional[threading.Thread] = None
+_peers: Dict[str, Dict[str, Any]] = {}   # hash/url → {url, agent, role, trusted, health, ...}
 _tasks: Dict[str, Dict[str, Any]] = {}   # received tasks
 _my_url: str = ""
 _my_role: str = "agent"
@@ -129,15 +311,33 @@ class ConstellationHandler(BaseHTTPRequestHandler):
 
         elif path == "/peers":
             peers_list = [p for p in _peers.values()]
-            self._json({"peers": peers_list, "count": len(peers_list)})
+            self._json({"peers": peers_list, "count": len(peers_list), "map_path": str(_PEERS_PATH)})
+
+        elif path == "/network-map":
+            self._json({
+                "self": {"agent": os.uname().nodename, "url": _my_url, "role": _my_role, "hash": _my_hash, "port": _actual_port},
+                "keepalive_seconds": _KEEPALIVE_SECONDS,
+                "peers": list(_peers.values()),
+                "count": len(_peers),
+                "map_path": str(_PEERS_PATH),
+            })
 
         elif path == "/tasks":
-            self._json({"tasks": list(_tasks.values()), "count": len(_tasks)})
+            status_index = _worker_status_index()
+            known_tasks = _all_known_tasks()
+            tasks = [_decorate_task_status(task, status_index) for task in known_tasks.values()]
+            pending = [
+                task for task in tasks
+                if task.get("status") in {"received", "queued"}
+                and str(task.get("type", "")).lower() not in {"response", "reply", "ack"}
+            ]
+            self._json({"tasks": tasks, "count": len(tasks), "pending_count": len(pending)})
 
         elif path.startswith("/task/"):
             task_id = path.split("/task/", 1)[1]
-            if task_id in _tasks:
-                self._json(_tasks[task_id])
+            known_tasks = _all_known_tasks()
+            if task_id in known_tasks:
+                self._json(_decorate_task_status(known_tasks[task_id], _worker_status_index()))
             else:
                 self._json({"error": "task not found"}, 404)
 
@@ -168,14 +368,15 @@ class ConstellationHandler(BaseHTTPRequestHandler):
             # Don't add ourselves
             if agent_url and agent_url != _my_url and agent_hash:
                 trusted = not _CONSTELLATION_KEY or agent_key == _CONSTELLATION_KEY
-                _peers[agent_hash] = {
+                _upsert_peer({
                     "agent": agent_name,
                     "url": agent_url,
                     "role": agent_role,
                     "hash": agent_hash,
                     "trusted": trusted,
                     "last_seen": datetime.now(timezone.utc).isoformat(),
-                }
+                    "health": "announced",
+                })
 
             self._json({
                 "acknowledged": True,
@@ -196,6 +397,9 @@ class ConstellationHandler(BaseHTTPRequestHandler):
                 "from": data.get("from", "unknown"),
                 "description": data.get("description", ""),
                 "reply_to": data.get("reply_to") or data.get("from_url") or data.get("url"),
+                "in_reply_to": data.get("in_reply_to"),
+                "ok": data.get("ok"),
+                "created_at": data.get("created_at"),
                 "received_at": received_at,
             }
             _append_jsonl(_INBOX_PATH, {
@@ -224,12 +428,6 @@ def _start_server() -> str:
         return f"Constellation already running on port {_actual_port}."
 
     # Determine our URL
-    hostname = socket.gethostname()
-    try:
-        local_ip = socket.gethostbyname(hostname)
-    except Exception:
-        local_ip = "127.0.0.1"
-
     ident = _load_identity()
     _my_role = ident["role"]
     _my_hash = ident["hash"]
@@ -240,15 +438,18 @@ def _start_server() -> str:
 
     for port in ports_to_try:
         try:
-            _my_url = f"http://{local_ip}:{port}"
+            _my_url = _public_url_for_port(port)
             _server = HTTPServer(("0.0.0.0", port), ConstellationHandler)
             _server.timeout = 1
             _server_thread = threading.Thread(target=_server.serve_forever, daemon=True)
             _server_thread.start()
             _start_time = datetime.now(timezone.utc)
             _actual_port = port
-            # Start UDP discovery listener
+            # Start UDP discovery listener and persistent keepalive map
+            _load_peers_into_memory()
+            _save_peer_map()
             _start_discovery_listener(port)
+            _start_keepalive_loop()
             break
         except OSError as e:
             last_error = str(e)
@@ -284,7 +485,7 @@ def _start_server() -> str:
         f"   GET  /peers       — known agents\n"
         f"   POST /announce    — register presence\n"
         f"   POST /task        — hand off a task\n"
-        f"   GET  /task/{id}   — task status\n"
+        f"   GET  /task/{{id}}   — task status\n"
         f"\n"
         f"Discover: /constellation announce http://<peer>:{_actual_port}"
     )
@@ -306,6 +507,75 @@ def _stop_server() -> str:
 
 # ── Peer Operations ───────────────────────────────────────────────────
 
+def _probe_peer(url: str) -> Dict[str, Any]:
+    """Health/identity probe used by keepalive; never raises."""
+    import urllib.request
+    result: Dict[str, Any] = {"url": _normalize_url(url), "checked_at": _now_iso()}
+    try:
+        health_req = urllib.request.Request(f"{result['url']}/health")
+        with urllib.request.urlopen(health_req, timeout=5) as resp:
+            result["health_status"] = resp.status
+            result["health"] = json.loads(resp.read() or b"{}")
+        try:
+            ident_req = urllib.request.Request(f"{result['url']}/identity")
+            with urllib.request.urlopen(ident_req, timeout=5) as resp:
+                identity = json.loads(resp.read() or b"{}")
+            result.update({
+                "agent": identity.get("agent", result.get("agent", "unknown")),
+                "hash": identity.get("hash", result.get("hash", "")),
+                "role": identity.get("role", result.get("role", "agent")),
+                "url": _normalize_url(identity.get("url") or result["url"]),
+            })
+        except Exception:
+            pass
+        result["online"] = True
+        result["last_seen"] = _now_iso()
+        result["last_error"] = ""
+    except Exception as exc:
+        result["online"] = False
+        result["last_error"] = repr(exc)
+    return result
+
+
+def _keepalive_once() -> None:
+    for key, peer in list(_peers.items()):
+        url = _normalize_url(str(peer.get("url", "")))
+        if not url or url == _my_url:
+            continue
+        probe = _probe_peer(url)
+        updated = dict(peer)
+        updated.update({k: v for k, v in probe.items() if v is not None})
+        if probe.get("online"):
+            # Announce after a successful probe so both sides refresh their maps.
+            try:
+                _announce_to(url)
+                updated["announced_at"] = _now_iso()
+            except Exception as exc:
+                updated["announce_error"] = repr(exc)
+        _peers[key] = updated
+    _save_peer_map()
+
+
+def _start_keepalive_loop() -> None:
+    """Start a background keepalive thread that refreshes the peer map every minute."""
+    global _keepalive_thread
+    if _keepalive_thread and _keepalive_thread.is_alive():
+        return
+    def _loop():
+        # First pass soon after startup, then every configured interval.
+        while _server:
+            try:
+                _keepalive_once()
+            except Exception:
+                pass
+            for _ in range(max(1, _KEEPALIVE_SECONDS)):
+                if not _server:
+                    return
+                time.sleep(1)
+    _keepalive_thread = threading.Thread(target=_loop, daemon=True)
+    _keepalive_thread.start()
+
+
 def _start_discovery_listener(port: int) -> None:
     """Background thread that responds to UDP discovery probes."""
     def _listen():
@@ -322,7 +592,7 @@ def _start_discovery_listener(port: int) -> None:
                         response = json.dumps({
                             "type": "vex-response",
                             "agent": os.uname().nodename,
-                            "url": f"http://{socket.gethostbyname(socket.gethostname())}:{port}",
+                            "url": _public_url_for_port(port),
                             "port": port,
                             "role": _my_role,
                         }).encode()
@@ -361,6 +631,15 @@ def _announce_to(url: str) -> str:
         )
         resp = urllib.request.urlopen(req, timeout=5)
         data = json.loads(resp.read())
+        _upsert_peer({
+            "agent": data.get("agent", "peer"),
+            "url": url,
+            "role": data.get("my_role", "peer"),
+            "hash": data.get("my_hash", ""),
+            "trusted": True,
+            "last_seen": _now_iso(),
+            "health": "announced",
+        })
         return (
             f"Announced to {url}\n"
             f"Response: {data.get('message', 'OK')}\n"

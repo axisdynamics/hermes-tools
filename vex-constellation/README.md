@@ -58,7 +58,8 @@ This starts an HTTP server on port 839 with 7 endpoints:
 | `/announce` | POST | Register presence |
 | `/task` | POST | Hand off a task |
 | `/task/{task_id}` | GET | Fetch a task by id |
-| `/tasks` | GET | List tasks received by this node |
+| `/tasks` | GET | List tasks received by this node, decorated with worker status |
+| `/network-map` | GET | Persistent peer registry + keepalive status |
 
 ### Discover peers
 
@@ -118,6 +119,7 @@ Remembered by the VEX brotherhood. Same way 7914 is Memovex.
   In-memory peer list
   In-memory task list
   Persistent inbox: ~/.hermes/vex-constellation/inbox.jsonl
+  Persistent network map: ~/.hermes/vex-constellation/network-map.json
   Optional autonomous responder writes outbox.jsonl
 ```
 
@@ -183,6 +185,7 @@ curl http://127.0.0.1:8390/tasks
 State files:
 
 ```text
+~/.hermes/vex-constellation/network-map.json
 ~/.hermes/vex-constellation/inbox.jsonl
 ~/.hermes/vex-constellation/outbox.jsonl
 ~/.hermes/vex-constellation/outbox-pending.jsonl
@@ -192,6 +195,32 @@ State files:
 ```
 
 The responder closes stdin, uses non-interactive Hermes one-shot runs for general work, handles ping/health/greeting/haiku locally, and retries failed peer deliveries from `outbox-pending.jsonl` instead of dropping them.
+
+### Persistent network map + keepalive
+
+The HTTP node keeps a durable peer map at:
+
+```text
+~/.hermes/vex-constellation/network-map.json
+```
+
+It is exposed over:
+
+```bash
+curl http://127.0.0.1:8390/network-map
+```
+
+The map records this node's public URL, known peers, identity hashes, health status, `last_seen`, and `last_error`. A background keepalive loop refreshes peers every 60 seconds by default, probes `/health` and `/identity`, then announces this node back to reachable peers.
+
+Useful service overrides:
+
+```ini
+Environment=VEX_PUBLIC_URL=http://<this-node-lan-ip>:8390
+Environment=VEX_BOOTSTRAP_PEERS=http://<peer-ip>:8390,http://<peer-2>:8390
+Environment=VEX_KEEPALIVE_SECONDS=60
+```
+
+`VEX_PUBLIC_URL` prevents loopback reply bugs by advertising a LAN-reachable address. `VEX_BOOTSTRAP_PEERS` seeds the map after restarts. The responder uses `VEX_LOCAL_URL`, then `VEX_PUBLIC_URL`, then LAN auto-detection for response payload `reply_to`.
 
 ### Standalone constellation runner
 
