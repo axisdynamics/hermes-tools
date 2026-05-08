@@ -15,11 +15,29 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 PORT = 839
 FALLBACK_PORT = 8390
 PROTOCOL_TAG = "vex-constellation"
 _actual_port: int = 0
+
+# ── Persistent inbox/outbox for autonomous bridge ─────────────────────
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+_STATE_DIR = _HERMES_HOME / "vex-constellation"
+_INBOX_PATH = _STATE_DIR / "inbox.jsonl"
+_OUTBOX_PATH = _STATE_DIR / "outbox.jsonl"
+
+
+def _append_jsonl(path: Path, obj: dict) -> None:
+    """Append a JSON object to a JSONL file without blocking the HTTP response."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    except Exception:
+        # Protocol must remain alive even if persistence fails.
+        pass
+
 
 # ── Runtime State ─────────────────────────────────────────────────────
 _server: Optional[HTTPServer] = None
@@ -113,6 +131,9 @@ class ConstellationHandler(BaseHTTPRequestHandler):
             peers_list = [p for p in _peers.values()]
             self._json({"peers": peers_list, "count": len(peers_list)})
 
+        elif path == "/tasks":
+            self._json({"tasks": list(_tasks.values()), "count": len(_tasks)})
+
         elif path.startswith("/task/"):
             task_id = path.split("/task/", 1)[1]
             if task_id in _tasks:
@@ -122,14 +143,14 @@ class ConstellationHandler(BaseHTTPRequestHandler):
 
         else:
             self._json({"error": "not found", "endpoints": [
-                "/health", "/identity", "/peers", "/announce", "/task"
+                "/health", "/identity", "/peers", "/announce", "/task", "/tasks"
             ]}, 404)
 
     def do_POST(self):
         path = self.path.rstrip("/")
         data = self._read_json()
 
-        elif path == "/announce":
+        if path == "/announce":
             agent_name = data.get("agent", "unknown")
             agent_url = data.get("url", "")
             agent_role = data.get("role", "agent")
@@ -167,14 +188,23 @@ class ConstellationHandler(BaseHTTPRequestHandler):
 
         elif path == "/task":
             task_id = data.get("task_id", f"vex-task-{int(time.time())}")
+            received_at = datetime.now(timezone.utc).isoformat()
             _tasks[task_id] = {
                 "task_id": task_id,
                 "status": "received",
                 "type": data.get("type", "unknown"),
                 "from": data.get("from", "unknown"),
                 "description": data.get("description", ""),
-                "received_at": datetime.now(timezone.utc).isoformat(),
+                "reply_to": data.get("reply_to") or data.get("from_url") or data.get("url"),
+                "received_at": received_at,
             }
+            _append_jsonl(_INBOX_PATH, {
+                "event": "task_received",
+                "task": _tasks[task_id],
+                "raw": data,
+                "remote_addr": self.client_address[0] if self.client_address else None,
+                "received_at": received_at,
+            })
             self._json({
                 "accepted": True,
                 "task_id": task_id,
@@ -188,7 +218,7 @@ class ConstellationHandler(BaseHTTPRequestHandler):
 # ── Server Lifecycle ──────────────────────────────────────────────────
 
 def _start_server() -> str:
-    global _server, _server_thread, _my_url, _start_time, _actual_port
+    global _server, _server_thread, _my_url, _start_time, _actual_port, _my_role, _my_hash
 
     if _server:
         return f"Constellation already running on port {_actual_port}."
@@ -355,6 +385,8 @@ def _send_task(url: str, description: str, task_type: str = "general") -> str:
         "description": description,
         "from": os.uname().nodename,
         "timeout": "30m",
+        "reply_to": _my_url,
+        "from_url": _my_url,
     }).encode()
 
     try:
@@ -567,7 +599,7 @@ def _constellation_help() -> str:
   /constellation health                  Check all peers' health
   /constellation help                    This help
 
-Protocol: VEX Constellation v1.0 — Port 839 (V-E-X)
+Protocol: VEX Constellation v1.1 — Port 839 (V-E-X)
 Docs:    protocol.md"""
 
 

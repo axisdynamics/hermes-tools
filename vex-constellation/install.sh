@@ -10,6 +10,9 @@ echo ""
 mkdir -p "${PLUGIN_DIR}"
 cp "${SCRIPT_DIR}/plugin.yaml" "${PLUGIN_DIR}/"
 cp "${SCRIPT_DIR}/__init__.py" "${PLUGIN_DIR}/"
+cp "${SCRIPT_DIR}/run_constellation.py" "${PLUGIN_DIR}/"
+cp "${SCRIPT_DIR}/vex_autoresponder.py" "${PLUGIN_DIR}/"
+cp "${SCRIPT_DIR}/vex-autoresponder.service" "${PLUGIN_DIR}/"
 echo "✓ Plugin files copied to ${PLUGIN_DIR}"
 
 if command -v hermes &>/dev/null; then

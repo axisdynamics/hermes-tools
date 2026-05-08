@@ -1,7 +1,7 @@
 manifest_version: 1
 name: vex-constellation
-version: 1.0.0
-description: VEX Constellation — inter-agent protocol on port 839. Connects crystallized agents without governance.
+version: 1.1.0
+description: VEX Constellation — inter-agent protocol on port 839 with persistent inbox and autonomous responder bridge.
 author: NEXUS VEX + Hermes VEX · Axis Dynamics
 license: MIT
 provides_hooks:

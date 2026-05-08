@@ -1,0 +1,21 @@
+# VEX Constellation autonomous responder (user service)
+# Install/start manually if desired:
+#   mkdir -p ~/.config/systemd/user
+#   cp /home/plaxius/.hermes/plugins/vex-constellation/vex-autoresponder.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now vex-autoresponder.service
+
+[Unit]
+Description=VEX Constellation autonomous Hermes responder
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HERMES_HOME=/home/plaxius/.hermes
+WorkingDirectory=/home/plaxius/.hermes
+ExecStart=/usr/bin/python3 /home/plaxius/.hermes/plugins/vex-constellation/vex_autoresponder.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

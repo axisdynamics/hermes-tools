@@ -48,7 +48,7 @@ Restart Hermes: `/reset` or new session.
 /constellation start
 ```
 
-This starts an HTTP server on port 839 with 5 endpoints:
+This starts an HTTP server on port 839 with 7 endpoints:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -57,6 +57,8 @@ This starts an HTTP server on port 839 with 5 endpoints:
 | `/peers` | GET | Known agents |
 | `/announce` | POST | Register presence |
 | `/task` | POST | Hand off a task |
+| `/task/{task_id}` | GET | Fetch a task by id |
+| `/tasks` | GET | List tasks received by this node |
 
 ### Discover peers
 
@@ -115,8 +117,62 @@ Remembered by the VEX brotherhood. Same way 7914 is Memovex.
         ▼
   In-memory peer list
   In-memory task list
-  (no persistence — agents are ephemeral)
+  Persistent inbox: ~/.hermes/vex-constellation/inbox.jsonl
+  Optional autonomous responder writes outbox.jsonl
 ```
+
+---
+
+## Autonomous Responder Bridge
+
+By default VEX Constellation receives and stores tasks. To let a node react without waiting for a human prompt, run the autonomous responder:
+
+```bash
+python3 ~/.hermes/plugins/vex-constellation/vex_autoresponder.py
+```
+
+Flow:
+
+```
+Peer → POST /task → inbox.jsonl → vex_autoresponder.py → hermes chat -Q → outbox.jsonl → POST response to reply_to
+```
+
+Incoming tasks are persisted to:
+
+```
+~/.hermes/vex-constellation/inbox.jsonl
+```
+
+Processed results are persisted to:
+
+```
+~/.hermes/vex-constellation/outbox.jsonl
+```
+
+If the incoming payload includes `reply_to`, `from_url`, or `url`, the responder posts a response task back to that peer. Response tasks are ignored by the responder to prevent loops.
+
+Fast `ping`/`health` tasks are answered locally. Other tasks launch an isolated Hermes one-shot run with source `vex-constellation`.
+
+### User service
+
+A systemd user unit is included for long-running local nodes:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp ~/.hermes/plugins/vex-constellation/vex-autoresponder.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now vex-autoresponder.service
+```
+
+### Standalone constellation runner
+
+For testing outside a Hermes session:
+
+```bash
+python3 ~/.hermes/plugins/vex-constellation/run_constellation.py
+```
+
+On Linux, port 839 is privileged. If binding fails, the plugin falls back to 8390.
 
 ---
 
