@@ -1,0 +1,18 @@
+# VEX Constellation HTTP node (user service)
+
+[Unit]
+Description=VEX Constellation HTTP node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HERMES_HOME=%h/.hermes
+Environment=PYTHONUNBUFFERED=1
+WorkingDirectory=%h/.hermes/plugins/vex-constellation
+ExecStart=/usr/bin/python3 %h/.hermes/plugins/vex-constellation/run_constellation.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

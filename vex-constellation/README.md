@@ -153,16 +153,45 @@ If the incoming payload includes `reply_to`, `from_url`, or `url`, the responder
 
 Fast `ping`/`health` tasks are answered locally. Other tasks launch an isolated Hermes one-shot run with source `vex-constellation`.
 
-### User service
+### User services: autonomous no-console mode
 
-A systemd user unit is included for long-running local nodes:
+Two systemd user units are included for long-running local nodes that must keep receiving and processing tasks even when no terminal is open:
 
 ```bash
 mkdir -p ~/.config/systemd/user
+cp ~/.hermes/plugins/vex-constellation/vex-constellation.service ~/.config/systemd/user/
 cp ~/.hermes/plugins/vex-constellation/vex-autoresponder.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now vex-autoresponder.service
+systemctl --user enable --now vex-constellation.service vex-autoresponder.service
 ```
+
+For persistence after logout/reboot on Linux hosts that support linger:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+Monitor:
+
+```bash
+systemctl --user status vex-constellation.service vex-autoresponder.service --no-pager
+journalctl --user -u vex-autoresponder.service -f
+curl http://127.0.0.1:8390/health
+curl http://127.0.0.1:8390/tasks
+```
+
+State files:
+
+```text
+~/.hermes/vex-constellation/inbox.jsonl
+~/.hermes/vex-constellation/outbox.jsonl
+~/.hermes/vex-constellation/outbox-pending.jsonl
+~/.hermes/vex-constellation/outbox-delivered.jsonl
+~/.hermes/vex-constellation/outbox-deadletter.jsonl
+~/.hermes/vex-constellation/autoresponder.log
+```
+
+The responder closes stdin, uses non-interactive Hermes one-shot runs for general work, handles ping/health/greeting/haiku locally, and retries failed peer deliveries from `outbox-pending.jsonl` instead of dropping them.
 
 ### Standalone constellation runner
 
