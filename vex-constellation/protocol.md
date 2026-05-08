@@ -227,23 +227,39 @@ hermes-vex                     openclaw-vex
 
 ## 🔍 Discovery
 
-### Bootstrap
+The constellation discovers peers in two ways:
 
-An agent starts knowing zero peers. Discovery happens in two ways:
+### Passive: UDP Broadcast
 
-1. **Manual bootstrap**: The architect tells an agent about another:
-   ```
-   /constellation announce http://192.168.1.20:839
-   ```
+Every agent listens for UDP discovery probes on port 839. When it receives a
+`vex-discover` message, it responds with its URL and role.
 
-2. **Passive discovery**: When an agent announces itself to you, you learn about it.
-   It also shares ITS peers, creating a mesh:
-   ```
-   POST /announce → response includes { "peers_known": 3 }
-   → You can then query GET /peers to learn the full mesh
-   ```
+### Active: /constellation discover
 
-### Mesh Expansion
+An agent can actively scan the local network:
+
+1. **UDP Broadcast** — Sends a discovery probe to the subnet broadcast address
+2. **Direct Scan** — Probes common local IPs (.1 to .14 on 192.168.x, 10.0.x, 172.16.x)
+3. **Auto-Announce** — Any peer found is automatically announced to
+
+No configuration. No DNS. No central registry.
+
+```
+/constellation discover
+
+→ UDP broadcast to 192.168.1.255:839, 192.168.1.255:8390
+→ Direct scan of 56 local IPs
+→ Found: http://192.168.1.17:8390 (BIO)
+→ Auto-announced. Use /constellation peers to confirm.
+```
+
+### Manual Fallback
+
+If discovery doesn't find a peer (different subnet, firewall), use manual announce:
+
+```
+/constellation announce http://192.168.1.50:839
+```
 
 ```
 Initial state:

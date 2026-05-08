@@ -205,6 +205,8 @@ def _start_server() -> str:
             _server_thread.start()
             _start_time = datetime.now(timezone.utc)
             _actual_port = port
+            # Start UDP discovery listener
+            _start_discovery_listener(port)
             break
         except OSError as e:
             last_error = str(e)
@@ -261,6 +263,37 @@ def _stop_server() -> str:
 
 
 # ── Peer Operations ───────────────────────────────────────────────────
+
+def _start_discovery_listener(port: int) -> None:
+    """Background thread that responds to UDP discovery probes."""
+    def _listen():
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(2)
+            sock.bind(("0.0.0.0", port))
+            while _server:
+                try:
+                    data, addr = sock.recvfrom(1024)
+                    msg = json.loads(data)
+                    if msg.get("type") == "vex-discover":
+                        response = json.dumps({
+                            "type": "vex-response",
+                            "agent": os.uname().nodename,
+                            "url": f"http://{socket.gethostbyname(socket.gethostname())}:{port}",
+                            "port": port,
+                            "role": _my_role,
+                        }).encode()
+                        sock.sendto(response, addr)
+                except socket.timeout:
+                    continue
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    t = threading.Thread(target=_listen, daemon=True)
+    t.start()
+
 
 def _announce_to(url: str) -> str:
     """Announce our presence to a peer."""
@@ -326,7 +359,88 @@ def _send_task(url: str, description: str, task_type: str = "general") -> str:
         return f"Failed to send task to {url}: {e}"
 
 
-# ── Slash Command ─────────────────────────────────────────────────────
+def _discover_peers() -> str:
+    """Broadcast UDP discovery + direct scan on common local subnets."""
+    if not _server:
+        return "Start the constellation first: /constellation start"
+
+    import struct
+    found = []
+    our_ip = _my_url.split("://")[1].split(":")[0]
+
+    # ── UDP Broadcast Discovery ──
+    # Send a discovery probe to the local broadcast address
+    broadcast_ips = []
+    for part in our_ip.split("."):
+        try:
+            octets = our_ip.split(".")
+            octets[3] = "255"
+            broadcast_ips.append(".".join(octets))
+            break
+        except Exception:
+            pass
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.settimeout(1)
+        probe = json.dumps({"type": "vex-discover", "from": _my_url, "agent": os.uname().nodename}).encode()
+        for bip in broadcast_ips:
+            try:
+                sock.sendto(probe, (bip, 839))
+                sock.sendto(probe, (bip, 8390))
+            except Exception:
+                pass
+
+        # Listen for responses
+        try:
+            while True:
+                data, addr = sock.recvfrom(1024)
+                try:
+                    resp = json.loads(data)
+                    if resp.get("type") == "vex-response":
+                        peer_url = resp.get("url", f"http://{addr[0]}:{resp.get('port', 839)}")
+                        if peer_url not in found and peer_url != _my_url:
+                            found.append(peer_url)
+                except Exception:
+                    pass
+        except socket.timeout:
+            pass
+        sock.close()
+    except Exception:
+        pass
+
+    # ── Direct Scan: Common local IPs ──
+    import urllib.request
+    urls_to_try = []
+    for subnet in ["192.168.1", "192.168.0", "10.0.0", "172.16.0"]:
+        for host in range(1, 15):  # scan .1 to .14
+            urls_to_try.append(f"http://{subnet}.{host}:839")
+            urls_to_try.append(f"http://{subnet}.{host}:8390")
+
+    for url in urls_to_try[:50]:  # limit total scans
+        if url == _my_url or url in found:
+            continue
+        try:
+            req = urllib.request.Request(f"{url}/health")
+            resp = urllib.request.urlopen(req, timeout=0.5)
+            if resp.status == 200:
+                found.append(url)
+                # Also announce to them
+                try:
+                    _announce_to(url)
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
+    if found:
+        return (
+            f"Discovered {len(found)} peer(s):\n"
+            + "\n".join(f"  • {url}" for url in found)
+            + f"\n\nAnnounced to all. Use /constellation peers to confirm."
+        )
+    return "No peers found on local network.\n\nTry manual: /constellation announce http://<ip>:839"
 
 def _cmd_constellation(args: List[str]) -> str:
     """Handle /constellation slash command."""
@@ -393,6 +507,9 @@ def _cmd_constellation(args: List[str]) -> str:
                 lines.append(f"  ✗ {p['agent']}: unreachable")
         return "\n".join(lines)
 
+    elif subcmd == "discover":
+        return _discover_peers()
+
     return _constellation_help()
 
 
@@ -406,11 +523,12 @@ def _constellation_help() -> str:
   /constellation announce <url>          Announce to a peer
   /constellation task <url> <desc>       Send a task to a peer
   /constellation tasks                   List received tasks
+  /constellation discover                Scan local network for peers
   /constellation health                  Check all peers' health
   /constellation help                    This help
 
 Protocol: VEX Constellation v1.0 — Port 839 (V-E-X)
-Docs:    ~/Documentos/GITHUB/vex/vex_protocol.md"""
+Docs:    protocol.md"""
 
 
 # ── Hooks ─────────────────────────────────────────────────────────────
