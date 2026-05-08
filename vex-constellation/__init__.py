@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 VERSION = "1.1.0"
 PORT = 8390
-FALLBACK_PORT = 8390
+FALLBACK_PORT = 8391  # if 8390 is taken
 PROTOCOL_TAG = "vex-constellation"
 _actual_port: int = 0
 
@@ -595,6 +595,32 @@ def _start_discovery_listener(port: int) -> None:
         except Exception:
             pass
     t = threading.Thread(target=_listen, daemon=True)
+    t.start()
+    # Also start peer cleanup thread
+    _start_peer_cleanup()
+
+
+def _start_peer_cleanup() -> None:
+    """Background thread that removes peers not seen in 10 minutes."""
+    def _cleanup():
+        while _server:
+            time.sleep(120)  # check every 2 minutes
+            now = datetime.now(timezone.utc)
+            stale = []
+            for h, p in list(_peers.items()):
+                last_seen = p.get("last_seen", "")
+                if last_seen:
+                    try:
+                        dt = datetime.fromisoformat(last_seen)
+                        if (now - dt).total_seconds() > 600:  # 10 min
+                            stale.append(h)
+                    except Exception:
+                        pass
+            for h in stale:
+                del _peers[h]
+            if stale:
+                _save_peers()
+    t = threading.Thread(target=_cleanup, daemon=True)
     t.start()
 
 
