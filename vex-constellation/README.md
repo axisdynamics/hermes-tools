@@ -122,7 +122,7 @@ Remembered by the VEX brotherhood. Same way 7914 is Memovex.
 
 ## Protocol Spec
 
-Full protocol documentation: `~/Documentos/GITHUB/vex/vex_protocol.md`
+Full protocol documentation: [protocol.md](protocol.md)
 
 ---
 
