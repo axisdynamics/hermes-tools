@@ -24,12 +24,15 @@ _actual_port: int = 0
 # ── Runtime State ─────────────────────────────────────────────────────
 _server: Optional[HTTPServer] = None
 _server_thread: Optional[threading.Thread] = None
-_peers: List[Dict[str, Any]] = []          # known agents
-_tasks: Dict[str, Dict[str, Any]] = {}     # received tasks
-_my_url: str = ""                          # this agent's URL
+_peers: Dict[str, Dict[str, Any]] = {}   # hash → {url, agent, role, trusted, ...}
+_tasks: Dict[str, Dict[str, Any]] = {}   # received tasks
+_my_url: str = ""
 _my_role: str = "agent"
 _my_hash: str = ""
 _start_time: Optional[datetime] = None
+
+# Shared secret for VEX agent authentication
+_CONSTELLATION_KEY = os.getenv("CONSTELLATION_KEY", "")
 
 # ── Identity ──────────────────────────────────────────────────────────
 
@@ -107,7 +110,8 @@ class ConstellationHandler(BaseHTTPRequestHandler):
             })
 
         elif path == "/peers":
-            self._json({"peers": _peers, "count": len(_peers)})
+            peers_list = [p for p in _peers.values()]
+            self._json({"peers": peers_list, "count": len(peers_list)})
 
         elif path.startswith("/task/"):
             task_id = path.split("/task/", 1)[1]
@@ -125,32 +129,40 @@ class ConstellationHandler(BaseHTTPRequestHandler):
         path = self.path.rstrip("/")
         data = self._read_json()
 
-        if path == "/announce":
+        elif path == "/announce":
             agent_name = data.get("agent", "unknown")
             agent_url = data.get("url", "")
             agent_role = data.get("role", "agent")
+            agent_hash = data.get("hash", "")
+            agent_key = data.get("key", "")
+
+            # Verify shared secret if configured
+            if _CONSTELLATION_KEY and agent_key != _CONSTELLATION_KEY:
+                self._json({
+                    "acknowledged": False,
+                    "error": "Invalid constellation key. Agents must share CONSTELLATION_KEY.",
+                }, 403)
+                return
 
             # Don't add ourselves
-            if agent_url and agent_url != _my_url:
-                # Update or add
-                for peer in _peers:
-                    if peer["url"] == agent_url:
-                        peer["last_seen"] = datetime.now(timezone.utc).isoformat()
-                        peer["agent"] = agent_name
-                        break
-                else:
-                    _peers.append({
-                        "agent": agent_name,
-                        "url": agent_url,
-                        "role": agent_role,
-                        "last_seen": datetime.now(timezone.utc).isoformat(),
-                    })
+            if agent_url and agent_url != _my_url and agent_hash:
+                trusted = not _CONSTELLATION_KEY or agent_key == _CONSTELLATION_KEY
+                _peers[agent_hash] = {
+                    "agent": agent_name,
+                    "url": agent_url,
+                    "role": agent_role,
+                    "hash": agent_hash,
+                    "trusted": trusted,
+                    "last_seen": datetime.now(timezone.utc).isoformat(),
+                }
 
             self._json({
                 "acknowledged": True,
                 "peers_known": len(_peers),
                 "message": f"Welcome to the constellation, {agent_name}.",
                 "my_url": _my_url,
+                "my_hash": _my_hash,
+                "my_role": _my_role,
             })
 
         elif path == "/task":
@@ -296,7 +308,7 @@ def _start_discovery_listener(port: int) -> None:
 
 
 def _announce_to(url: str) -> str:
-    """Announce our presence to a peer."""
+    """Announce our presence to a peer, including identity hash and key."""
     import urllib.request
     import urllib.error
 
@@ -307,6 +319,8 @@ def _announce_to(url: str) -> str:
         "agent": os.uname().nodename,
         "url": _my_url,
         "role": _my_role,
+        "hash": _my_hash,
+        "key": _CONSTELLATION_KEY,
     }).encode()
 
     try:
@@ -323,7 +337,8 @@ def _announce_to(url: str) -> str:
             f"They know {data.get('peers_known', 0)} peers."
         )
     except urllib.error.HTTPError as e:
-        return f"Peer {url} returned HTTP {e.code}"
+        body = e.read().decode()[:200]
+        return f"Peer {url} returned HTTP {e.code}: {body}"
     except Exception as e:
         return f"Failed to reach {url}: {e}"
 
@@ -418,28 +433,51 @@ def _discover_peers() -> str:
             urls_to_try.append(f"http://{subnet}.{host}:839")
             urls_to_try.append(f"http://{subnet}.{host}:8390")
 
-    for url in urls_to_try[:50]:  # limit total scans
+    for url in urls_to_try[:50]:
         if url == _my_url or url in found:
             continue
         try:
+            # Step 1: Health check
             req = urllib.request.Request(f"{url}/health")
             resp = urllib.request.urlopen(req, timeout=0.5)
-            if resp.status == 200:
-                found.append(url)
-                # Also announce to them
-                try:
-                    _announce_to(url)
-                except Exception:
-                    pass
+            if resp.status != 200:
+                continue
+
+            # Step 2: Query identity
+            req = urllib.request.Request(f"{url}/identity")
+            resp = urllib.request.urlopen(req, timeout=1)
+            identity = json.loads(resp.read())
+            agent_hash = identity.get("hash", "")
+            agent_name = identity.get("agent", "unknown")
+            agent_role = identity.get("role", "?")
+
+            if not agent_hash:
+                continue
+
+            found.append(url)
+
+            # Step 3: Announce with our identity + key
+            _announce_to(url)
+
+            msg = f"  • {url} → {agent_name} [{agent_role}] ({agent_hash[:20]}...)"
+            if agent_hash in _peers:
+                msg += " ✓"
+
         except Exception:
             continue
 
     if found:
-        return (
-            f"Discovered {len(found)} peer(s):\n"
-            + "\n".join(f"  • {url}" for url in found)
-            + f"\n\nAnnounced to all. Use /constellation peers to confirm."
-        )
+        lines = [f"Discovered {len(found)} peer(s):"]
+        for url in found:
+            # Find the peer info from our _peers dict
+            info = f"  • {url}"
+            for h, p in _peers.items():
+                if p["url"] == url:
+                    info += f" → {p['agent']} [{p['role']}] {'✓ trusted' if p.get('trusted') else ''}"
+                    break
+            lines.append(info)
+        lines.append(f"\nAnnounced to all. Use /constellation peers to confirm.")
+        return "\n".join(lines)
     return "No peers found on local network.\n\nTry manual: /constellation announce http://<ip>:839"
 
 def _cmd_constellation(args: List[str]) -> str:
@@ -468,10 +506,12 @@ def _cmd_constellation(args: List[str]) -> str:
 
     elif subcmd == "peers":
         if not _peers:
-            return "No peers discovered.\n\nDiscover: /constellation announce http://<peer>:839"
-        lines = [f"Known peers ({len(_peers)}):", "─" * 40]
-        for p in _peers:
-            lines.append(f"  {p['agent']} — {p['url']} ({p.get('role', '?')})")
+            return "No peers discovered.\n\nDiscover: /constellation discover"
+        lines = [f"Known peers ({len(_peers)}):", "─" * 50]
+        for h, p in _peers.items():
+            trusted = "✓" if p.get("trusted") else "?"
+            lines.append(f"  {trusted} {p['agent']} [{p['role']}] — {p['url']}")
+            lines.append(f"    hash: {h[:40]}...")
         return "\n".join(lines)
 
     elif subcmd == "announce":
@@ -494,15 +534,15 @@ def _cmd_constellation(args: List[str]) -> str:
 
     elif subcmd == "health":
         if not _peers:
-            return "No peers to check. Discover some first."
-        lines = ["Peer health:", "─" * 40]
+            return "No peers to check. Discover some first: /constellation discover"
+        lines = ["Peer health:", "─" * 50]
         import urllib.request
-        for p in _peers[:10]:
+        for h, p in list(_peers.items())[:10]:
             try:
                 req = urllib.request.Request(f"{p['url'].rstrip('/')}/health")
                 resp = urllib.request.urlopen(req, timeout=3)
                 data = json.loads(resp.read())
-                lines.append(f"  ✓ {p['agent']}: {data.get('status', '?')} (uptime: {data.get('uptime', '?')})")
+                lines.append(f"  ✓ {p['agent']} [{p['role']}]: {data.get('status', '?')}")
             except Exception:
                 lines.append(f"  ✗ {p['agent']}: unreachable")
         return "\n".join(lines)
