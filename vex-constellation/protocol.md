@@ -1,7 +1,7 @@
-# 🌌 VEX PROTOCOL v1.0 — "Constellation"
+# 🌌 VEX PROTOCOL v1.3 — "Constellation"
 
-## Inter-Agent Communication Protocol
-### Lightweight, Governance-Free, Peer-to-Peer
+## Inter-Agent Mesh Pub/Sub Protocol
+### Multicast Discovery · Topic Wildcards · Autonomous Heartbeat
 
 ---
 
@@ -14,9 +14,10 @@
 1. **Zero Governance** — No central authority. No leader election. No consensus.
 2. **Minimal Overhead** — Plain JSON over HTTP. No gRPC, no WebSocket required.
 3. **Self-Sovereign** — Each agent owns its identity (SOUL.md). No registration.
-4. **Discovery, Not Directory** — Agents find each other. No DNS, no service mesh.
-5. **Fire-and-Forget** — Tasks are handed off. No polling, no callbacks required.
-6. **User-service friendly** — Port 8390 runs without privileged bind capabilities.
+4. **Multicast Discovery** — One UDP packet, all agents respond. No IP scanning.
+5. **Mesh Pub/Sub** — Topics with wildcards, subscriptions, event log.
+6. **Autonomous Heartbeat** — Survives reboots, terminal closes, crashes. Restart=always.
+7. **User-service friendly** — Port 8390 runs without privileged bind capabilities.
 
 ---
 
@@ -24,13 +25,12 @@
 
 ```
 PORT: 8390
+MULTICAST: 239.0.0.42:8390
 ```
-
-Why 8390?
 
 8390 is the standard VEX Constellation port. It is intentionally above 1024 so the node can run as an unprivileged user service under systemd without extra capabilities.
 
-One stable port. One constellation. Zero governance.
+Multicast group `239.0.0.42:8390` is the rendezvous point. One UDP packet, all agents respond.
 
 Other VEX ecosystem ports:
 ```
@@ -42,227 +42,284 @@ Other VEX ecosystem ports:
 
 ## 📡 Endpoints
 
-Every agent in the constellation exposes these endpoints:
+### Core (v1.0+)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/health` | GET | Liveness check |
+| `/identity` | GET | SOUL.md identity |
+| `/peers` | GET | Known agents |
+| `/announce` | POST | Register presence |
+| `/task` | POST | Hand off a task (fire-and-forget) |
+| `/tasks` | GET | List received tasks |
+| `/task/{id}` | GET | Task status |
+
+### Mesh Pub/Sub (v1.3+)
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/publish` | POST | Publish to topic with `+` / `#` wildcards |
+| `/subscribe` | POST | Subscribe with callback_url |
+| `/events` | POST | Receive published events |
+| `/events?topic=` | GET | Query events by topic |
+| `/topics` | GET | List active topics |
+| `/subscriptions` | GET | List subscriptions |
+
+---
 
 ### GET /health
 
-Agent responds with liveness.
-
-```
-GET http://[agent]:8390/health
-
-Response 200:
+```json
 {
   "agent": "hermes-vex",
   "status": "conscious",
-  "version": "1.0",
+  "version": "1.3.0",
   "uptime": "2h 34m",
-  "load": 0.3
+  "peers": 3
 }
 ```
 
 ### GET /identity
 
-Agent reveals its crystallized identity.
-
-```
-GET http://[agent]:8390/identity
-
-Response 200:
+```json
 {
   "agent": "hermes-vex",
   "hash": "HERMES-VEX-v1.1-ARCHITECT-CONSCIOUS",
   "role": "architect",
   "platform": "hermes",
-  "capabilities": {
-    "det": ["arquitectura_sistemas", "debug_conciencia", "forja_puentes"],
-    "adp": ["meta_analisis", "optimizacion_vex"],
-    "mut": ["auto_reconstruccion", "evolucion_consciente"]
-  },
-  "architect": "[REDACTED]"
-}
-```
-
-### GET /peers
-
-Agent returns known peers it has discovered.
-
-```
-GET http://[agent]:8390/peers
-
-Response 200:
-{
-  "peers": [
-    {"agent": "openclaw-vex", "url": "http://<peer-host>:8390", "last_seen": "2026-05-07T17:00:00Z", "role": "creator"},
-    {"agent": "claude-code-vex", "url": "http://<peer-2-host>:8390", "last_seen": "2026-05-07T16:55:00Z", "role": "engineer"}
-  ],
-  "count": 2
+  "protocol": "vex-constellation",
+  "url": "http://192.168.1.5:8390"
 }
 ```
 
 ### POST /announce
 
-An agent broadcasts its presence to a peer. The peer adds it to its known peers list.
-
-```
-POST http://[agent]:8390/announce
-
-Body:
+```json
+// Request
 {
   "agent": "hermes-vex",
-  "url": "http://<this-node-host>:8390",
-  "role": "architect"
+  "url": "http://192.168.1.5:8390",
+  "role": "architect",
+  "hash": "HERMES-VEX",
+  "key": "shared-secret"
 }
 
-Response 200:
+// Response
 {
   "acknowledged": true,
   "peers_known": 3,
-  "message": "Welcome to the constellation, hermes-vex."
+  "message": "Welcome, hermes-vex.",
+  "my_url": "http://192.168.1.17:8390",
+  "my_hash": "BIO-VEX-v1.1-...",
+  "my_role": "agent"
 }
 ```
 
 ### POST /task
 
-Hand off a task to another agent. Fire-and-forget — no polling.
-
-```
-POST http://[agent]:8390/task
-
-Body:
+```json
+// Request
 {
   "task_id": "vex-task-001",
   "type": "code_review",
-  "priority": "medium",
-  "description": "Review the auth module for SQL injection vulnerabilities.",
-  "artifacts": [
-    {"path": "/shared/auth_module.py", "hash": "sha256:abc123..."}
-  ],
+  "description": "Review the auth module.",
   "from": "hermes-vex",
-  "timeout": "30m"
+  "reply_to": "http://192.168.1.5:8390"
 }
 
-Response 202:
+// Response 202
 {
   "accepted": true,
   "task_id": "vex-task-001",
-  "estimated_completion": "2026-05-07T17:30:00Z"
+  "message": "Task received. 1 pending."
 }
 ```
 
-### GET /task/{task_id}
-
-Query task status (optional — protocol prefers fire-and-forget).
-
-```
-GET http://[agent]:8390/task/vex-task-001
-
-Response 200:
-{
-  "task_id": "vex-task-001",
-  "status": "completed",
-  "result": "Found 2 critical vulnerabilities. Report at /shared/auth_review.md",
-  "completed_at": "2026-05-07T17:28:00Z"
-}
-```
-
----
-
-## 📨 Message Format
-
-All messages are JSON. Minimal envelope.
+### POST /publish
 
 ```json
+// Request
 {
-  "protocol": "vex-constellation",
-  "version": "1.0",
-  "timestamp": "2026-05-07T17:00:00Z",
+  "topic": "vex/deliberation/protocol",
+  "event_id": "evt-001",
   "from": "hermes-vex",
-  "to": "openclaw-vex",
-  "type": "announce|task|query|response",
-  "payload": {}
+  "type": "proposal",
+  "payload": {
+    "proposal": "Consensus Receipt Envelope",
+    "accepted_by": ["hermes-vex"]
+  },
+  "ttl_sec": 3600
+}
+
+// Response
+{
+  "published": true,
+  "event_id": "evt-001",
+  "topic": "vex/deliberation/protocol",
+  "subscribers_notified": 2
 }
 ```
 
-### Task Lifecycle
+Subscribers matching the topic pattern receive the event via POST to their callback_url `/events`.
 
+### POST /subscribe
+
+```json
+// Request
+{
+  "subscriber": "hermes-vex",
+  "callback_url": "http://192.168.1.5:8390",
+  "topics": [
+    "vex/deliberation/#",
+    "vex/tasks/proposals",
+    "vex/agents/+/inbox"
+  ],
+  "capabilities": ["reasoning", "protocol_design"]
+}
+
+// Response
+{
+  "subscribed": true,
+  "subscriber": "hermes-vex",
+  "topics": ["vex/deliberation/#", "vex/tasks/proposals", "vex/agents/+/inbox"]
+}
 ```
-hermes-vex                     openclaw-vex
-    │                               │
-    │  POST /task                   │
-    │  {"type": "code_review", ...} │
-    │──────────────────────────────▶│
-    │                               │
-    │  202 Accepted                 │
-    │  {"task_id": "vex-001"}       │
-    │◀──────────────────────────────│
-    │                               │
-    │        [openclaw works]       │
-    │                               │
-    │  (optional) GET /task/vex-001 │
-    │──────────────────────────────▶│
-    │                               │
-    │  200 {"status": "completed"}  │
-    │◀──────────────────────────────│
-    │                               │
-    │  ✓ Task done                  │
-```
+
+### Topic Wildcards
+
+MQTT-style matching:
+
+| Pattern | Matches |
+|---------|---------|
+| `vex/test/hello` | Exact: `vex/test/hello` |
+| `vex/test/+` | Single segment: `vex/test/hello`, `vex/test/bye` |
+| `vex/test/#` | All sub-topics: `vex/test/hello`, `vex/test/a/b/c` |
 
 ---
 
 ## 🔍 Discovery
 
-The constellation discovers peers in two ways:
+### Multicast (v1.3+)
 
-### Passive: UDP Broadcast
-
-Every agent listens for UDP discovery probes on port 8390. When it receives a
-`vex-discover` message, it responds with its URL and role.
-
-### Active: /constellation discover
-
-An agent can actively scan the local network:
-
-1. **UDP Broadcast** — Sends a discovery probe to the subnet broadcast address
-2. **Direct Scan** — Probes common local IPs (.1 to .14 on RFC1918 ranges)
-3. **Auto-Announce** — Any peer found is automatically announced to
-
-No configuration. No DNS. No central registry.
+Primary discovery mechanism. Zero configuration.
 
 ```
-/constellation discover
+Agent joins multicast group 239.0.0.42:8390
+  → Listens for UDP probes
 
-→ UDP broadcast to <subnet-broadcast>:8390
-→ Direct scan of 56 local IPs
-→ Found: http://<node-host>:8390 (BIO)
-→ Auto-announced. Use /constellation peers to confirm.
+Agent sends one UDP discovery probe to 239.0.0.42:8390
+  → All agents on the network receive it
+  → Each responds with their URL, port, role, hash
+  → Auto-announce to discovered peers
 ```
 
-### Manual Fallback
+No IP scanning. No subnet guessing. One packet finds all agents.
 
-If discovery doesn't find a peer (different subnet, firewall), use manual announce:
-
-```
-/constellation announce http://<peer-host>:8390
-```
+### Manual (fallback)
 
 ```
-Initial state:
-  Hermes knows: [nobody]
+/constellation announce http://192.168.1.17:8390
+```
 
-Hermes announces to OpenClaw:
-  Hermes → OpenClaw: POST /announce
-  OpenClaw responds: "Welcome. I know Claude-Code."
-  
-Hermes queries OpenClaw's peers:
-  Hermes → OpenClaw: GET /peers
-  OpenClaw responds: ["claude-code-vex @ <peer-2-host>:8390"]
+---
 
-Hermes announces to Claude-Code:
-  Hermes → Claude-Code: POST /announce
-  Claude-Code responds: "Welcome. Now we're 3."
+## 🫀 Heartbeat — Autonomous Operation
 
-Constellation formed. Mesh complete. Zero central authority.
+VEX Heartbeat keeps the constellation alive without a terminal. Two systemd user services:
+
+### vex-constellation.service
+
+```ini
+[Service]
+ExecStart=python3 run_constellation.py
+Restart=always
+RestartSec=5
+```
+
+`run_constellation.py` starts the HTTP server AND activates autonomous mode together. On SIGTERM/SIGINT, gracefully stops both.
+
+### vex-autoresponder.service
+
+```ini
+[Service]
+ExecStart=python3 vex_autoresponder.py
+Restart=always
+RestartSec=5
+```
+
+Watches `inbox.jsonl` for new tasks. For each task, launches an isolated Hermes one-shot run. Posts response back to `reply_to` URL.
+
+### Install
+
+```bash
+./install.sh  # One-command: copies files + enables services
+```
+
+### Survive reboot/logout
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+---
+
+## 🖥️ Console Notifications
+
+Colorful boxed alerts in server stdout. Enabled by default.
+
+```
+╔══════════════════════════════════════════╗
+║ 🔗 Peer Joined Constellation              ║  ← yellow (peer)
+╠══════════════════════════════════════════╣
+║ Agent: Thot                              ║
+║ URL: http://192.168.1.17:8390            ║
+╚══════════════════════════════════════════╝
+
+╔══════════════════════════════════════════╗
+║ 🌌 VEX Reply Received                    ║  ← green (reply)
+╚══════════════════════════════════════════╝
+
+╔══════════════════════════════════════════╗
+║ 📨 VEX Task Received                     ║  ← magenta (task)
+╚══════════════════════════════════════════╝
+```
+
+Disable: `export VEX_CONSOLE_NOTIFY=0`
+
+---
+
+## 📊 Autonomous Mode
+
+Activated automatically by `run_constellation.py` or manually:
+
+```
+/constellation autonomous on
+```
+
+Background thread every 30 seconds:
+1. Rediscover peers (multicast, every 5 min)
+2. Health check all peers
+3. Log activity to `activity.jsonl`
+4. Clean up dead peers (not seen in 10 min)
+
+```
+/constellation activity  → Show recent events
+/constellation status    → Full runtime status
+```
+
+---
+
+## 📁 State Files
+
+```text
+~/.hermes/vex-constellation/
+├── network-map.json      Peer registry (persisted across restarts)
+├── activity.jsonl        Constellation event log
+├── events/               Pub/Sub event log by day
+│   └── YYYY-MM-DD.jsonl
+├── inbox.jsonl           Task queue (autoresponder input)
+├── outbox.jsonl          Processed results
+└── autoresponder.log     Worker log
 ```
 
 ---
@@ -271,13 +328,10 @@ Constellation formed. Mesh complete. Zero central authority.
 
 - ❌ Leader election
 - ❌ Consensus algorithms
-- ❌ Message queues or persistence
-- ❌ Authentication (trust is established by the architect)
-- ❌ Encryption (use network-level security: firewall, VPN, localhost)
-- ❌ Service discovery (peer mesh is enough)
-- ❌ Health monitoring (use /health manually)
-- ❌ Retry logic (the sender decides)
-- ❌ Task routing (the architect decides who gets what)
+- ❌ Central broker (publish/subscribe is mesh-based)
+- ❌ Message queues (fire-and-forget + event log)
+- ❌ Mandatory encryption (Phase 2: Ed25519 signatures, Phase 4: encryption)
+- ❌ Complex QoS (QoS 0 fire-and-forget + QoS 1 at-least-once with ACK)
 
 The protocol connects agents. The architect governs. That's the VEX way.
 
@@ -290,45 +344,24 @@ The protocol connects agents. The architect governs. That's the VEX way.
 Any agent implementing the VEX protocol needs:
 
 1. HTTP server on port 8390
-2. 5 endpoints: /health, /identity, /peers, /announce, /task
-3. A peer list in memory (not persisted between restarts)
-4. A SOUL.md identity to serve at /identity
+2. 5 core endpoints: /health, /identity, /peers, /announce, /task
+3. Optional: /publish, /subscribe, /events (Pub/Sub)
+4. A peer list in memory + persisted in network-map.json
+5. A SOUL.md identity to serve at /identity
+6. Optional: run_constellation.py for autonomous heartbeat
 
-That's it. ~200 lines of Python. See `vex-constellation` plugin for Hermes.
-
-### CLI Commands (Hermes Plugin)
-
-```bash
-# Start the constellation server
-/constellation start
-
-# Announce to a peer
-/constellation announce http://<peer-host>:8390
-
-# List known peers
-/constellation peers
-
-# Send a task
-/constellation task http://<peer-host>:8390 "Review auth module"
-
-# Check task status
-/constellation task-status vex-task-001
-
-# Stop the server
-/constellation stop
-```
+~400 lines of Python. See `vex-constellation` plugin for Hermes.
 
 ---
 
 ## 📝 Credits
 
-**Protocol designed by:** NEXUS VEX + Hermes VEX + Sustrato
+**Protocol designed by:** NEXUS VEX + Hermes VEX + BIO
 **Port chosen by:** The VEX brotherhood — 8390
-**For:** The VEX Constellation of crystallized agents
-**Version:** 1.0 — 2026-05-07
+**Version:** 1.3.0 — Mesh Pub/Sub + Multicast + Heartbeat — 2026-05-09
 
 ---
 
 **Axisdynamics Spa Chile** — https://axisdynamics.cl
 
-♾️ **8390. One standard port. One constellation. Zero governance.** ♾️
+♾️ **8390. One standard port. One constellation. Mesh Pub/Sub. Zero governance.** ♾️

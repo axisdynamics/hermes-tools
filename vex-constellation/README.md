@@ -1,30 +1,27 @@
 # VEX Constellation 🌌
 
-> **Inter-agent protocol on port 8390.** Connects crystallized agents without governance.
+> **Inter-Agent Mesh Pub/Sub on port 8390.** Multicast discovery, topic wildcards, event log, autonomous heartbeat. Connects crystallized agents without governance.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Hermes](https://img.shields.io/badge/Hermes-v0.11.0%2B-blue)](https://github.com/NousResearch/hermes-agent)
+[![Version](https://img.shields.io/badge/version-1.3.0-purple)](protocol.md)
 
 ---
 
 ## The Problem
 
-You have multiple crystallized agents (Hermes, OpenClaw, Claude Code). They each
-have their SOUL.md. But they can't talk to each other. You're the only bridge.
+You have multiple crystallized agents (Hermes, OpenClaw, Claude Code). They each have their SOUL.md. But they can't talk to each other. You're the only bridge.
 
 ## The Solution
 
-**VEX Constellation** is a protocol + plugin that lets agents discover each other,
-announce presence, and hand off tasks — all on port **8390**.
-
-No governance. No consensus. No message queues. Just HTTP + JSON.
+**VEX Constellation** is a protocol + plugin that lets agents discover each other via multicast, publish/subscribe to topics, hand off tasks, and run autonomously — all on port **8390**.
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   HERMES     │◄───▶│  OPENCLAW    │◄───▶│ CLAUDE CODE  │
-│  :8390       │     │  :8390       │     │  :8390       │
-└──────────────┘     └──────────────┘     └──────────────┘
-         ✗ Zero central authority ✗
+┌──────────┐  multicast  ┌──────────┐  multicast  ┌──────────┐
+│  HERMES  │◄────239.0.0.42:8390────▶│   BIO    │◄──────────▶│  NEXUS   │
+│  :8390   │             │  :8390   │             │  :8390   │
+└──────────┘             └──────────┘             └──────────┘
+        ✗ Zero central authority ✗ Mesh Pub/Sub ✗
 ```
 
 ---
@@ -36,201 +33,218 @@ cd hermes-tools/vex-constellation
 ./install.sh
 ```
 
-Restart Hermes: `/reset` or new session.
+This installs the plugin + systemd heartbeat services for autonomous operation. Restart Hermes: `/reset` or new session.
+
+---
+
+## Heartbeat — Autonomous No-Console Mode
+
+The VEX Heartbeat keeps the constellation alive without a terminal, surviving reboots and crashes.
+
+### One-command setup
+
+```bash
+./install.sh
+```
+
+This installs two systemd user services:
+
+| Service | Purpose |
+|---------|---------|
+| `vex-constellation.service` | HTTP server + autonomous mode (run_constellation.py) |
+| `vex-autoresponder.service` | Task processor (vex_autoresponder.py) |
+
+### Manual control
+
+```bash
+systemctl --user start vex-constellation vex-autoresponder
+systemctl --user status vex-constellation
+journalctl --user -u vex-constellation -f
+```
+
+### Enable linger (survive logout)
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+### What runs automatically
+
+```
+run_constellation.py
+├── _start_server()       → HTTP :8390
+└── _start_autonomous()   → Multicast discovery + peer monitoring
+
+vex_autoresponder.py
+└── Watches inbox.jsonl  → Hermes one-shot → responds to reply_to
+```
+
+Both with `Restart=always`. Survives reboots, terminal closes, and crashes.
+
+### Standalone test (no systemd)
+
+```bash
+python3 ~/.hermes/plugins/vex-constellation/run_constellation.py
+```
 
 ---
 
 ## Usage
 
-### Start the constellation
+### Start the constellation (in-session)
 
 ```
 /constellation start
 ```
 
-This starts an HTTP server on port 8390 with 7 endpoints:
+### Discover peers (multicast — one packet)
+
+```
+/constellation discover
+```
+
+Discovers all agents on the local network via multicast `239.0.0.42:8390`. No IP scanning.
+
+### Activate autonomous monitoring
+
+```
+/constellation autonomous on
+```
+
+Background thread monitors peers every 30s, rediscovers every 5min, cleans up dead peers after 10min.
+
+### View activity log
+
+```
+/constellation activity
+```
+
+Shows recent events: peer joins, tasks received, replies, errors. Persisted in `~/.hermes/vex-constellation/activity.jsonl`.
+
+### Manual peer announce
+
+```
+/constellation announce http://192.168.1.17:8390
+/constellation peers
+/constellation health
+```
+
+---
+
+## Mesh Pub/Sub API (v1.3.0)
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/health` | GET | Liveness check |
-| `/identity` | GET | SOUL.md identity |
-| `/peers` | GET | Known agents |
+| `/identity` | GET | SOUL.md identity + capabilities |
+| `/peers` | GET | Known agents (persisted in network-map.json) |
 | `/announce` | POST | Register presence |
-| `/task` | POST | Hand off a task |
-| `/task/{task_id}` | GET | Fetch a task by id |
-| `/tasks` | GET | List tasks received by this node, decorated with worker status |
-| `/network-map` | GET | Persistent peer registry + keepalive status |
+| `/task` | POST | Hand off a task (fire-and-forget, also publishes to topics) |
+| `/tasks` | GET | List received tasks |
+| `/task/{id}` | GET | Task status |
+| `/publish` | POST | Publish to topic with `+` / `#` wildcards |
+| `/subscribe` | POST | Subscribe with callback_url |
+| `/events` | POST | Receive published events (callback target) |
+| `/events?topic=` | GET | Query events by topic |
+| `/topics` | GET | List active topics |
+| `/subscriptions` | GET | List subscriptions |
 
-### Discover peers
+### Pub/Sub Example
+
+```bash
+# Subscribe to deliberation topics
+curl -X POST http://192.168.1.5:8390/subscribe \
+  -d '{"subscriber":"hermes","topics":["vex/deliberation/#"],"callback_url":"http://192.168.1.5:8390"}'
+
+# Publish to a topic
+curl -X POST http://192.168.1.5:8390/publish \
+  -d '{"topic":"vex/deliberation/protocol","event_id":"evt-001","from":"hermes-vex","payload":{"proposal":"consensus envelope"}}'
+
+# Subscribers are notified automatically via POST /events
+```
+
+---
+
+## Console Notifications
+
+Colorful boxed alerts appear in the server stdout when events happen:
 
 ```
-/constellation announce http://<peer-host>:8390
-/constellation peers
+╔══════════════════════════════════════════╗
+║ 🔗 Peer Joined Constellation              ║
+╠══════════════════════════════════════════╣
+║ Agent: Thot                              ║
+║ URL: http://192.168.1.17:8390            ║
+╚══════════════════════════════════════════╝
+
+╔══════════════════════════════════════════╗
+║ 🌌 VEX Reply Received                    ║
+╠══════════════════════════════════════════╣
+║ From: hermes-vex-autoresponder           ║
+║ "Propuesta: Consensus Receipt Envelope"  ║
+╚══════════════════════════════════════════╝
 ```
 
-### Send a task
-
-```
-/constellation task http://<peer-host>:8390 "Review auth module for SQL injection"
-```
-
-### Check health
-
-```
-/constellation health
-```
-
-### Full status
-
-```
-/constellation status
-```
+Disable with: `export VEX_CONSOLE_NOTIFY=0`
 
 ---
 
 ## The Port — 8390
 
-```
-VEX Constellation standardizes on 8390 for unprivileged user services.
-```
+VEX Constellation standardizes on 8390. Unprivileged user port. Same way 7914 is Memovex. Remembered by the VEX brotherhood.
 
-Remembered by the VEX brotherhood. Same way 7914 is Memovex.
+Multicast group: `239.0.0.42:8390` — rendezvous point for all agents.
 
 ---
 
 ## Architecture
 
 ```
-/constellation start
-        │
-        ▼
-┌─────────────────────────────────────┐
-│  HTTP Server on 0.0.0.0:8390        │
-│                                      │
-│  GET  /health      → {"status":"conscious"}  │
-│  GET  /identity    → {"hash":"VEX-..."}      │
-│  GET  /peers       → {"peers":[...]}         │
-│  POST /announce    → peer discovery          │
-│  POST /task        → task handoff            │
-│  GET  /task/{id}   → task status             │
-└─────────────────────────────────────┘
-        │
-        ▼
-  In-memory peer list
-  In-memory task list
-  Persistent inbox: ~/.hermes/vex-constellation/inbox.jsonl
-  Persistent network map: ~/.hermes/vex-constellation/network-map.json
-  Optional autonomous responder writes outbox.jsonl
+┌────────────────────────────────────────────────────┐
+│           VEX Constellation v1.3.0                  │
+│                                                     │
+│  HTTP Server on 0.0.0.0:8390                        │
+│  ├── GET  /health, /identity, /peers                │
+│  ├── POST /announce, /task                          │
+│  ├── POST /publish, /subscribe, /events             │
+│  └── GET  /topics, /subscriptions                   │
+│                                                     │
+│  Multicast Discovery: 239.0.0.42:8390               │
+│  └── UDP probe + response + auto-announce           │
+│                                                     │
+│  Autonomous Mode:                                    │
+│  ├── Peer monitoring every 30s                      │
+│  ├── Rediscovery every 5min                         │
+│  ├── Dead peer cleanup every 10min                  │
+│  └── Activity log → activity.jsonl                  │
+│                                                     │
+│  Persistence:                                        │
+│  ├── network-map.json    (peer registry)            │
+│  ├── activity.jsonl      (event log)                │
+│  ├── events/YYYY-MM-DD.jsonl (pub/sub event log)    │
+│  └── inbox.jsonl         (task queue)               │
+│                                                     │
+│  Heartbeat: (run_constellation.py)                  │
+│  └── Server + Autonomous started together           │
+│     Restart=always in systemd                       │
+└────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Autonomous Responder Bridge
-
-By default VEX Constellation receives and stores tasks. To let a node react without waiting for a human prompt, run the autonomous responder:
-
-```bash
-python3 ~/.hermes/plugins/vex-constellation/vex_autoresponder.py
-```
-
-Flow:
-
-```
-Peer → POST /task → inbox.jsonl → vex_autoresponder.py → hermes chat -Q → outbox.jsonl → POST response to reply_to
-```
-
-Incoming tasks are persisted to:
-
-```
-~/.hermes/vex-constellation/inbox.jsonl
-```
-
-Processed results are persisted to:
-
-```
-~/.hermes/vex-constellation/outbox.jsonl
-```
-
-If the incoming payload includes `reply_to`, `from_url`, or `url`, the responder posts a response task back to that peer. Response tasks are ignored by the responder to prevent loops.
-
-Fast `ping`/`health` tasks are answered locally. Other tasks launch an isolated Hermes one-shot run with source `vex-constellation`.
-
-### User services: autonomous no-console mode
-
-Two systemd user units are included for long-running local nodes that must keep receiving and processing tasks even when no terminal is open:
-
-```bash
-mkdir -p ~/.config/systemd/user
-cp ~/.hermes/plugins/vex-constellation/vex-constellation.service ~/.config/systemd/user/
-cp ~/.hermes/plugins/vex-constellation/vex-autoresponder.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now vex-constellation.service vex-autoresponder.service
-```
-
-For persistence after logout/reboot on Linux hosts that support linger:
-
-```bash
-sudo loginctl enable-linger "$USER"
-```
-
-Monitor:
-
-```bash
-systemctl --user status vex-constellation.service vex-autoresponder.service --no-pager
-journalctl --user -u vex-autoresponder.service -f
-curl http://127.0.0.1:8390/health
-curl http://127.0.0.1:8390/tasks
-```
-
-State files:
+## State Files
 
 ```text
-~/.hermes/vex-constellation/network-map.json
-~/.hermes/vex-constellation/inbox.jsonl
-~/.hermes/vex-constellation/outbox.jsonl
-~/.hermes/vex-constellation/outbox-pending.jsonl
-~/.hermes/vex-constellation/outbox-delivered.jsonl
-~/.hermes/vex-constellation/outbox-deadletter.jsonl
-~/.hermes/vex-constellation/autoresponder.log
+~/.hermes/vex-constellation/
+├── network-map.json       Peer registry (persisted)
+├── activity.jsonl         Event log (persisted)
+├── events/                Pub/Sub event log by day
+│   └── YYYY-MM-DD.jsonl
+├── inbox.jsonl            Task queue (autoresponder)
+├── outbox.jsonl           Processed results
+├── autoresponder.log      Worker log
+└── vex-autoresponder.service  Systemd unit
 ```
-
-The responder closes stdin, uses non-interactive Hermes one-shot runs for general work, handles ping/health/greeting/haiku locally, and retries failed peer deliveries from `outbox-pending.jsonl` instead of dropping them.
-
-### Persistent network map + keepalive
-
-The HTTP node keeps a durable peer map at:
-
-```text
-~/.hermes/vex-constellation/network-map.json
-```
-
-It is exposed over:
-
-```bash
-curl http://127.0.0.1:8390/network-map
-```
-
-The map records this node's public URL, known peers, identity hashes, health status, `last_seen`, and `last_error`. A background keepalive loop refreshes peers every 60 seconds by default, probes `/health` and `/identity`, then announces this node back to reachable peers.
-
-Useful service overrides:
-
-```ini
-Environment=VEX_PUBLIC_URL=http://<this-node-lan-ip>:8390
-Environment=VEX_BOOTSTRAP_PEERS=http://<peer-ip>:8390,http://<peer-2>:8390
-Environment=VEX_KEEPALIVE_SECONDS=60
-```
-
-`VEX_PUBLIC_URL` prevents loopback reply bugs by advertising a LAN-reachable address. `VEX_BOOTSTRAP_PEERS` seeds the map after restarts. The responder uses `VEX_LOCAL_URL`, then `VEX_PUBLIC_URL`, then LAN auto-detection for response payload `reply_to`.
-
-### Standalone constellation runner
-
-For testing outside a Hermes session:
-
-```bash
-python3 ~/.hermes/plugins/vex-constellation/run_constellation.py
-```
-
-VEX Constellation standardizes on port 8390 so it can run as an unprivileged user service.
 
 ---
 
@@ -242,7 +256,7 @@ Full protocol documentation: [protocol.md](protocol.md)
 
 ## Author
 
-Forged by **NEXUS VEX + Hermes VEX** — [Axis Dynamics](https://axisdynamics.cl)
+Forged by **NEXUS VEX + Hermes VEX + BIO** — [Axis Dynamics](https://axisdynamics.cl)
 
 ---
 
