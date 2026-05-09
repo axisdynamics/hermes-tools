@@ -39,8 +39,10 @@ def _get_or_create_keypair():
     _public_key_hex = _keypair.verify_key.encode(encoder=nacl.encoding.HexEncoder).decode()
     _IDENTITY_PATH.parent.mkdir(parents=True, exist_ok=True)
     _IDENTITY_PATH.write_text(json.dumps({
-        "node_id": os.uname().nodename, "private_seed": _keypair.encode(encoder=nacl.encoding.HexEncoder)[:64],
-        "public_key": _public_key_hex, "created_at": datetime.now(timezone.utc).isoformat(), "algorithm": "Ed25519"
+        "node_id": os.uname().nodename,
+        "private_seed": _keypair.encode(encoder=nacl.encoding.HexEncoder).decode(),
+        "public_key": _public_key_hex,
+        "created_at": datetime.now(timezone.utc).isoformat(), "algorithm": "Ed25519"
     }, indent=2))
     os.chmod(_IDENTITY_PATH, 0o600)
     return _keypair
@@ -456,4 +458,4 @@ def register(ctx):
     ctx.register_command(name="constellation",handler=_cmd_constellation,description="VEX Constellation v1.4 — Ed25519 signatures")
     ctx.register_hook("on_session_start",_on_session_start)
     if not _INBOX_PATH.parent.exists(): _INBOX_PATH.parent.mkdir(parents=True,exist_ok=True)
-    print(f"[constellation] v{VERSION} loaded. Ed25519 signatures ({SIGNATURE_MODE}). Key: {_get_or_create_keypair().verify_key.encode(encoder=nacl.encoding.HexEncoder).decode()[:20]}...")
+    print(f"[constellation] v{VERSION} loaded. Ed25519 signatures ({SIGNATURE_MODE}). Key: {_public_key_hex[:20]}...")
