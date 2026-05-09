@@ -3,7 +3,7 @@
 
 import json, os, socket, struct, threading, time, urllib.request, urllib.error, urllib.parse, base64
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -109,7 +109,16 @@ def _append_jsonl(p,d):
     try: p.parent.mkdir(parents=True,exist_ok=True)
     except: return
     with p.open("a",encoding="utf-8") as f: f.write(json.dumps(d,ensure_ascii=False)+"\n")
-def _load_jsonl(p): return [json.loads(l) for l in p.read_text(encoding="utf-8",errors="replace").splitlines() if l.strip()] if p.exists() else []
+
+def _load_jsonl(p):
+    rows=[]
+    if not p.exists(): return rows
+    for line in p.read_text(encoding="utf-8",errors="replace").splitlines():
+        if not line.strip(): continue
+        try: rows.append(json.loads(line))
+        except: continue
+    return rows
+
 def _load_identity():
     for p in [Path("SOUL.md"), Path.home()/"SOUL.md", _HERMES_HOME/"SOUL.md"]:
         if p.exists():
@@ -166,6 +175,88 @@ def _topic_match(pattern, topic):
         if p!=tp[i]: return False
     return len(pp)==len(tp)
 
+def _worker_status_index() -> Dict[str, Dict[str, Any]]:
+    """Merge autonomous responder status into HTTP task inspection."""
+    idx: Dict[str, Dict[str, Any]] = {}
+    for row in _load_jsonl(_OUTBOX_PATH):
+        task = row.get("task", {}) if isinstance(row, dict) else {}
+        tid = task.get("task_id")
+        if tid:
+            result = row.get("result", {}) or {}
+            idx[str(tid)] = {
+                "status": "processed",
+                "processed_at": row.get("processed_at"),
+                "worker_ok": result.get("ok"),
+                "worker_mode": result.get("mode"),
+                "reply": row.get("reply"),
+            }
+    for row in _load_jsonl(_STATE_DIR / "outbox-delivered.jsonl"):
+        tid = row.get("task_id") if isinstance(row, dict) else None
+        if tid:
+            idx.setdefault(str(tid), {})["delivery"] = row.get("delivery")
+            idx[str(tid)]["status"] = "delivered"
+    return idx
+
+def _merged_tasks() -> Dict[str, Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = dict(_tasks)
+    for row in _load_jsonl(_INBOX_PATH):
+        task = row.get("task", {}) if isinstance(row, dict) else row
+        if isinstance(task, dict) and task.get("task_id"):
+            merged.setdefault(str(task["task_id"]), task)
+    for tid, status in _worker_status_index().items():
+        if tid in merged:
+            merged[tid] = {**merged[tid], **status}
+    return merged
+
+def _publish_event(event: Dict[str, Any]) -> Dict[str, Any]:
+    topic = event.get("topic", "")
+    event_id = event.get("event_id", f"evt-{int(time.time()*1000)}")
+    event["event_id"] = event_id
+    if event_id in _published_events:
+        return {"published": False, "reason": "duplicate event_id", "event_id": event_id, "topic": topic, "subscribers_notified": 0}
+    _published_events.add(event_id)
+    if len(_published_events) > 10000: _published_events.clear()
+
+    # Phase 4: encrypt payload for the requested recipient when possible.
+    security = event.get("security", "signed")
+    encrypted_payload = event.get("encrypted_payload", "")
+    if security == "encrypted" and encrypted_payload:
+        event["security"] = "encrypted"
+    elif security == "encrypted" and event.get("to"):
+        recipients = event.get("to", []) if isinstance(event.get("to"), list) else [event["to"]]
+        payload = event.get("payload", {})
+        for recipient_id in recipients:
+            rk = ""
+            if recipient_id == os.uname().nodename:
+                rk = _enc_public_hex
+            else:
+                for _, pr in _peers.items():
+                    if pr.get("agent") == recipient_id or pr.get("hash", "")[:20] == str(recipient_id)[:20]:
+                        rk = pr.get("encryption_key", ""); break
+            if rk:
+                encrypted_payload = _encrypt_for(payload, rk)
+                event["encrypted_payload"] = encrypted_payload
+                event.pop("payload", None)
+                break
+
+    if not event.get("signature"):
+        event = _sign_payload(event)
+
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    _EVENT_LOG_PATH.mkdir(parents=True, exist_ok=True)
+    _append_jsonl(_EVENT_LOG_PATH / f"{day}.jsonl", event)
+    matched = 0
+    for sub in _subscriptions.values():
+        for pat in sub.get("topics", []):
+            if _topic_match(pat, topic):
+                matched += 1
+                cb = sub.get("callback_url", "")
+                if cb:
+                    try:
+                        urllib.request.urlopen(urllib.request.Request(f"{cb.rstrip('/')}/events", data=json.dumps(event).encode(), headers={"Content-Type":"application/json"}), timeout=5)
+                    except: pass
+    return {"published": True, "event_id": event_id, "topic": topic, "subscribers_notified": matched, "signed": True, "signer": _public_key_hex, "security": event.get("security", "signed"), "encrypted": bool(event.get("encrypted_payload"))}
+
 class ConstellationHandler(BaseHTTPRequestHandler):
     def log_message(self,f,*a): pass
     def _json(self,d,status=200):
@@ -178,7 +269,8 @@ class ConstellationHandler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(l)) if l else {}
 
     def do_GET(self):
-        p=self.path.rstrip("/")
+        parsed=urllib.parse.urlparse(self.path)
+        p=parsed.path.rstrip("/") or "/"
         if p=="/health":
             upt=""
             if _start_time:
@@ -189,11 +281,18 @@ class ConstellationHandler(BaseHTTPRequestHandler):
             self._json({"agent":os.uname().nodename,"hash":i["hash"],"role":i["role"],"platform":"hermes","protocol":PROTOCOL_TAG,"url":_my_url,"public_key":_public_key_hex,"encryption_key":_enc_public_hex,"signature_mode":SIGNATURE_MODE,"encryption_mode":ENCRYPTION_MODE})
         elif p=="/peers": self._json({"peers":list(_peers.values()),"count":len(_peers),"map_path":str(_PEERS_PATH)})
         elif p.startswith("/task/"):
-            tid=p.split("/task/",1)[1]; self._json(_tasks.get(tid,{"error":"task not found"}),404 if tid not in _tasks else 200)
-        elif p=="/tasks": self._json({"tasks":list(_tasks.values()),"count":len(_tasks)})
+            tid=p.split("/task/",1)[1]
+            tasks=_merged_tasks()
+            self._json(tasks.get(tid,{"error":"task not found"}),404 if tid not in tasks else 200)
+        elif p=="/tasks":
+            tasks=_merged_tasks()
+            self._json({"tasks":list(tasks.values()),"count":len(tasks)})
+        elif p=="/network-map":
+            self._json({"self":{"agent":os.uname().nodename,"url":_my_url,"role":_my_role,"hash":_my_hash,"port":_actual_port,"public_key":_public_key_hex,"encryption_key":_enc_public_hex},"peers":list(_peers.values()),"count":len(_peers),"map_path":str(_PEERS_PATH)})
         elif p=="/events":
             qs=urllib.parse.urlparse(self.path).query; params=dict(urllib.parse.parse_qsl(qs))
             ft=params.get("topic",""); day=datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if ft.endswith("/"): ft += "#"  # tolerate unescaped URL fragments like ?topic=vex/#
             events=_load_jsonl(_EVENT_LOG_PATH/f"{day}.jsonl")[-50:]
             if ft: events=[e for e in events if _topic_match(ft,e.get("topic",""))]
             self._json({"events":events[-20:],"count":len(events)})
@@ -221,53 +320,22 @@ class ConstellationHandler(BaseHTTPRequestHandler):
                 _notify("🔗 Peer Joined",f"Agent: {an}\nRole: {ar}\nSig: {pk[:20] if pk else '?'}... Enc: {'✓' if ek else '?'}",kind="peer")
         elif p=="/task":
             tid=d.get("task_id",f"vex-task-{int(time.time())}")
-            _tasks[tid]={"task_id":tid,"status":"received","type":d.get("type","unknown"),"from":d.get("from","unknown"),"description":d.get("description",""),"reply_to":d.get("reply_to",""),"received_at":datetime.now(timezone.utc).isoformat()}
-            self._json({"accepted":True,"task_id":tid,"message":f"Task received. {len(_tasks)} pending."},202)
+            task={**d,"task_id":tid,"status":"received","type":d.get("type","unknown"),"from":d.get("from","unknown"),
+                  "description":d.get("description",""),"reply_to":d.get("reply_to",d.get("from_url",d.get("url",""))),"received_at":datetime.now(timezone.utc).isoformat()}
+            _tasks[tid]=task
+            _append_jsonl(_INBOX_PATH,{"event":"task_received","task":task,"raw":d,"remote_addr":self.client_address[0] if self.client_address else "","received_at":task["received_at"]})
+            pub=_publish_event({"topic":d.get("topic","vex/task"),"event_id":f"task-{tid}","from":d.get("from","unknown"),"type":"task","payload":task,"created_at":task["received_at"]})
+            self._json({"accepted":True,"task_id":tid,"message":f"Task received. {len(_tasks)} pending.","published":pub.get("published"),"topic":pub.get("topic"),"subscribers_notified":pub.get("subscribers_notified")},202)
             if _autonomous_mode:
                 _log_activity("task_received",f"{tid}: {d.get('description','')[:80]}",d.get("from",""))
                 desc=d.get("description",""); tf=d.get("from","")
                 kind="reply" if ("reply" in tid or tf.endswith("-autoresponder")) else "task"
                 _notify("🌌 VEX Reply" if kind=="reply" else "📨 VEX Task",f"From: {tf}\nTask: {tid}\n{desc[:200]}",kind=kind)
         elif p=="/publish" and d:
-            topic=d.get("topic",""); event_id=d.get("event_id",f"evt-{int(time.time())}")
-            if event_id in _published_events: self._json({"published":False,"reason":"duplicate"},409); return
-            _published_events.add(event_id)
-            if len(_published_events)>10000: _published_events.clear()
-            # Phase 4: Handle encryption
-            security = d.get("security", "signed")
-            encrypted_payload = d.get("encrypted_payload","")
-            if security == "encrypted" and encrypted_payload:
-                # Already encrypted by sender — pass through
-                d["security"] = "encrypted"
-            elif security == "encrypted" and d.get("to"):
-                recipients = d.get("to",[]) if isinstance(d.get("to"),list) else [d["to"]]
-                payload = d.get("payload",{})
-                for recipient_id in recipients:
-                    rk = ""
-                    # Check self first
-                    if recipient_id == os.uname().nodename:
-                        rk = _enc_public_hex
-                    else:
-                        for h,pr in _peers.items():
-                            if pr.get("agent") == recipient_id or pr.get("hash","")[:20] == recipient_id[:20]:
-                                rk = pr.get("encryption_key",""); break
-                    if rk:
-                        encrypted_payload = _encrypt_for(payload, rk)
-                        d["encrypted_payload"] = encrypted_payload; d.pop("payload",None)
-                        break
-            # Phase 2: Sign
-            if not d.get("signature"): d = _sign_payload(d)
-            day=datetime.now(timezone.utc).strftime("%Y-%m-%d"); _EVENT_LOG_PATH.mkdir(parents=True,exist_ok=True)
-            _append_jsonl(_EVENT_LOG_PATH/f"{day}.jsonl",d)
-            matched=0
-            for sid,sub in _subscriptions.items():
-                for pat in sub.get("topics",[]):
-                    if _topic_match(pat,topic):
-                        cb=sub.get("callback_url",""); matched+=1
-                        if cb:
-                            try: urllib.request.urlopen(urllib.request.Request(f"{cb.rstrip('/')}/events",data=json.dumps(d).encode(),headers={"Content-Type":"application/json"}),timeout=5)
-                            except: pass
-            self._json({"published":True,"event_id":event_id,"topic":topic,"subscribers_notified":matched,"signed":True,"signer":_public_key_hex,"security":d.get("security","signed"),"encrypted":bool(d.get("encrypted_payload"))})
+            pub=_publish_event(d)
+            if not pub.get("published") and pub.get("reason")=="duplicate event_id":
+                self._json(pub,409); return
+            self._json(pub)
         elif p=="/subscribe" and d:
             topics=d.get("topics",[]); cb=d.get("callback_url",""); cap=d.get("capabilities",[])
             sub_id=d.get("subscriber",f"sub-{int(time.time())}")
@@ -356,14 +424,14 @@ def _discover_peers():
     return "No peers found via multicast."
 
 def _start_server():
-    global _server,_server_thread,_my_url,_start_time,_actual_port
+    global _server,_server_thread,_my_url,_my_role,_my_hash,_start_time,_actual_port
     if _server: return f"Already running on {_actual_port}."
     ident=_load_identity(); _my_role=ident["role"]; _my_hash=ident["hash"]
     _get_or_create_keypair(); _get_encryption_keypair()
     for port in [PORT]:
         try:
             _my_url=_public_url_for_port(port)
-            _server=HTTPServer(("0.0.0.0",port),ConstellationHandler); _server.timeout=1
+            _server=ThreadingHTTPServer(("0.0.0.0",port),ConstellationHandler); _server.timeout=1
             _server_thread=threading.Thread(target=_server.serve_forever,daemon=True); _server_thread.start()
             _start_time=datetime.now(timezone.utc); _actual_port=port
             _start_multicast_listener(port); _start_peer_cleanup()
