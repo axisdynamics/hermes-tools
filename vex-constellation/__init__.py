@@ -240,15 +240,17 @@ class ConstellationHandler(BaseHTTPRequestHandler):
                 # Already encrypted by sender — pass through
                 d["security"] = "encrypted"
             elif security == "encrypted" and d.get("to"):
-                # Encrypt payload for specific recipients
                 recipients = d.get("to",[]) if isinstance(d.get("to"),list) else [d["to"]]
                 payload = d.get("payload",{})
                 for recipient_id in recipients:
-                    # Find recipient's encryption key from peers
                     rk = ""
-                    for h,pr in _peers.items():
-                        if pr.get("agent") == recipient_id or pr.get("hash","")[:20] == recipient_id[:20]:
-                            rk = pr.get("encryption_key",""); break
+                    # Check self first
+                    if recipient_id == os.uname().nodename:
+                        rk = _enc_public_hex
+                    else:
+                        for h,pr in _peers.items():
+                            if pr.get("agent") == recipient_id or pr.get("hash","")[:20] == recipient_id[:20]:
+                                rk = pr.get("encryption_key",""); break
                     if rk:
                         encrypted_payload = _encrypt_for(payload, rk)
                         d["encrypted_payload"] = encrypted_payload; d.pop("payload",None)
