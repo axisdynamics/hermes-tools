@@ -15,6 +15,7 @@ import subprocess
 import time
 import urllib.parse
 import urllib.request
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,10 @@ POLL_SECONDS = float(os.environ.get("VEX_POLL_SECONDS", "2"))
 RETRY_SECONDS = float(os.environ.get("VEX_RETRY_SECONDS", "15"))
 MAX_DELIVERY_ATTEMPTS = int(os.environ.get("VEX_MAX_DELIVERY_ATTEMPTS", "0"))  # 0 = forever
 DELIVERY_TIMEOUT = float(os.environ.get("VEX_DELIVERY_TIMEOUT", "10"))
+SHARED_MEMORY_ENABLED = os.environ.get("VEX_SHARED_MEMORY_ENABLED", "1") == "1"
+SHARED_MEMORY_NAMESPACE = os.environ.get("VEX_SHARED_MEMORY_NAMESPACE", "vex-hermandad-2026")
+SHARED_MEMOVEX_AGENT_ID = os.environ.get("VEX_SHARED_MEMOVEX_AGENT_ID", "chronos")
+MEMOVEX_API_URL = os.environ.get("MEMOVEX_API_URL", "http://127.0.0.1:7914").rstrip("/")
 
 
 def now() -> str:
@@ -122,9 +127,71 @@ def iter_inbox() -> list[dict[str, Any]]:
     return load_jsonl(INBOX)
 
 
+def redact_shared_context(text: Any, limit: int = 900) -> str:
+    value = str(text or "")
+    if os.environ.get("HOME"):
+        value = value.replace(os.environ["HOME"], "~")
+    value = re.sub(r"https?://(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(?::\d+)?", "http://<private-host>:8390", value)
+    value = re.sub(r"\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b", "<private-ip>", value)
+    value = re.sub(r"/home/[A-Za-z0-9._-]+", "~", value)
+    value = re.sub(r"(ghp_|github_pat_|gho_|ghs_)[A-Za-z0-9_]+", "<redacted-github-token>", value)
+    return value[:limit]
+
+
+def shared_memory_context(event: dict[str, Any]) -> str:
+    """Best-effort shared chronicle retrieval from MemoVex.
+
+    This is intentionally non-fatal: autonomous task processing must keep working
+    even if MemoVex is down or the shared bank is not installed yet.
+    """
+    if not SHARED_MEMORY_ENABLED:
+        return ""
+    task = event.get("task", {}) if isinstance(event, dict) else {}
+    raw = event.get("raw", {}) if isinstance(event, dict) else {}
+    query = " ".join(
+        str(x or "")
+        for x in [
+            SHARED_MEMORY_NAMESPACE,
+            task.get("type"),
+            task.get("from"),
+            task.get("description"),
+            raw.get("topic") if isinstance(raw, dict) else "",
+        ]
+    ).strip()[:1200]
+    if not query:
+        return ""
+    payload = {
+        "query": f"namespace:{SHARED_MEMORY_NAMESPACE} {query}",
+        "top_k": 5,
+        "channels": ["semantic", "entity", "tag", "wisdom"],
+    }
+    try:
+        req = urllib.request.Request(
+            f"{MEMOVEX_API_URL}/api/{SHARED_MEMOVEX_AGENT_ID}/retrieve",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+        results = data.get("results") if isinstance(data, dict) else []
+        if not results:
+            return f"VEX shared chronicle namespace={SHARED_MEMORY_NAMESPACE}: no relevant memories found yet."
+        lines = [f"VEX shared chronicle namespace={SHARED_MEMORY_NAMESPACE} bank={SHARED_MEMOVEX_AGENT_ID}:"]
+        for i, item in enumerate(results[:5], 1):
+            text = item.get("text") or item.get("content") or item.get("memory") or json.dumps(item, ensure_ascii=False)
+            text = redact_shared_context(text, 900)
+            score = item.get("score") or item.get("similarity") or item.get("resonance") or ""
+            lines.append(f"[{i}] score={score} {text}")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"VEX shared chronicle unavailable: {exc!r}"
+
+
 def build_prompt(event: dict[str, Any]) -> str:
     task = event.get("task", {})
     raw = event.get("raw", {})
+    shared_context = shared_memory_context(event)
     return f"""Eres un Hermes autónomo activado por VEX Constellation.
 
 Contexto operativo:
@@ -141,6 +208,9 @@ Tarea VEX normalizada:
 
 Payload crudo:
 {json.dumps(raw, ensure_ascii=False, indent=2)}
+
+Memoria compartida VEX/MemoVex:
+{shared_context}
 """
 
 

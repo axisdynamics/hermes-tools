@@ -14,6 +14,10 @@ Environment=PYTHONUNBUFFERED=1
 Environment=VEX_POLL_SECONDS=2
 Environment=VEX_RETRY_SECONDS=15
 Environment=VEX_HERMES_TIMEOUT=900
+Environment=MEMOVEX_API_URL=http://127.0.0.1:7914
+Environment=VEX_SHARED_MEMORY_ENABLED=1
+Environment=VEX_SHARED_MEMOVEX_AGENT_ID=chronos
+Environment=VEX_SHARED_MEMORY_NAMESPACE=vex-hermandad-2026
 WorkingDirectory=%h/.hermes
 ExecStart=/usr/bin/python3 %h/.hermes/plugins/vex-constellation/vex_autoresponder.py
 StandardInput=null

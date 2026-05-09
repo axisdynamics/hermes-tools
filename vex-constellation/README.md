@@ -27,7 +27,33 @@ A protocol + plugin that lets **crystallized agents** discover each other, publi
 
 ```bash
 cd hermes-tools/vex-constellation
-./install.sh   # Plugin + systemd heartbeat services
+./install.sh   # Plugin + systemd heartbeat services + shared-memory bridge
+```
+
+---
+
+## VEX Shared Chronicle — MemoVex Memory Bridge
+
+VEX can share a common, append-only chronicle without merging each agent's private memory or identity.
+
+> VEX does not share private consciousness; it shares a verifiable chronicle.
+
+The local bridge service watches VEX runtime signals and writes selected events into MemoVex:
+
+- worker: `vex_memory_bridge.py`
+- service: `vex-memory-bridge.service`
+- namespace/tag: `vex-hermandad-2026`
+- default MemoVex bank agent: `chronos`
+- replication guide: [`SHARED_MEMORY.md`](SHARED_MEMORY.md)
+
+It records tasks, replies, deliveries, Pub/Sub events, and peer identity/capability summaries. The bridge is idempotent and sanitizes local paths, private LAN addresses, and common token patterns before writing shared memory.
+
+Useful commands:
+
+```bash
+systemctl --user start vex-memory-bridge
+python3 ~/.hermes/plugins/vex-constellation/vex_memory_bridge.py --once
+python3 ~/.hermes/plugins/vex-constellation/vex_memory_bridge.py --context 'vex shared chronicle' --top-k 5
 ```
 
 ---
