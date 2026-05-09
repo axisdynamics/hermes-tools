@@ -1,42 +1,50 @@
 #!/usr/bin/env bash
+# VEX Heartbeat — One-command autonomous constellation setup
 set -euo pipefail
 
 PLUGIN_DIR="${HOME}/.hermes/plugins/vex-constellation"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SERVICE_DIR="${HOME}/.config/systemd/user"
 
-echo "=== VEX Constellation v1.1.0 — Install ==="
+echo "=== VEX Heartbeat v1.2 ==="
 echo ""
 
+# Copy plugin files
 mkdir -p "${PLUGIN_DIR}"
-cp "${SCRIPT_DIR}/plugin.yaml" "${PLUGIN_DIR}/"
-cp "${SCRIPT_DIR}/__init__.py" "${PLUGIN_DIR}/"
-cp "${SCRIPT_DIR}/run_constellation.py" "${PLUGIN_DIR}/"
-cp "${SCRIPT_DIR}/vex_autoresponder.py" "${PLUGIN_DIR}/"
-cp "${SCRIPT_DIR}/vex-constellation.service" "${PLUGIN_DIR}/"
-cp "${SCRIPT_DIR}/vex-autoresponder.service" "${PLUGIN_DIR}/"
-echo "✓ Plugin files copied to ${PLUGIN_DIR}"
+for f in plugin.yaml __init__.py vex_autoresponder.py run_constellation.py; do
+    cp "${SCRIPT_DIR}/${f}" "${PLUGIN_DIR}/"
+done
+echo "✓ Plugin files installed"
 
-if command -v hermes &>/dev/null; then
-    hermes plugins enable vex-constellation 2>/dev/null || \
-        echo "  Add 'vex-constellation' to plugins.enabled in ~/.hermes/config.yaml"
-    echo "✓ Plugin enabled"
+# Install systemd services
+mkdir -p "${SERVICE_DIR}"
+cp "${SCRIPT_DIR}/vex-constellation.service" "${SERVICE_DIR}/"
+cp "${SCRIPT_DIR}/vex-autoresponder.service" "${SERVICE_DIR}/"
+echo "✓ Systemd services installed"
+
+# Reload and enable
+if command -v systemctl &>/dev/null; then
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable vex-constellation.service 2>/dev/null || true
+    systemctl --user enable vex-autoresponder.service 2>/dev/null || true
+    echo "✓ Services enabled (auto-start on boot)"
 else
-    echo "⚠ hermes CLI not found. Add 'vex-constellation' to plugins.enabled manually."
+    echo "⚠ systemctl not found. Start manually:"
+    echo "  python3 ${PLUGIN_DIR}/run_constellation.py &"
+    echo "  python3 ${PLUGIN_DIR}/vex_autoresponder.py &"
+fi
+
+# Enable plugin in Hermes
+if command -v hermes &>/dev/null; then
+    hermes plugins enable vex-constellation 2>/dev/null || true
 fi
 
 echo ""
 echo "=== Done ==="
 echo ""
-echo "Quick start:"
-echo "  /constellation start"
-echo "  /constellation announce http://<peer>:8390"
-echo "  /constellation peers"
+echo "Start now:  systemctl --user start vex-constellation vex-autoresponder"
+echo "Status:     systemctl --user status vex-constellation"
+echo "Logs:       journalctl --user -u vex-constellation -f"
 echo ""
-echo "Autonomous service mode:"
-echo "  mkdir -p ~/.config/systemd/user"
-echo "  cp ${PLUGIN_DIR}/vex-constellation.service ~/.config/systemd/user/"
-echo "  cp ${PLUGIN_DIR}/vex-autoresponder.service ~/.config/systemd/user/"
-echo "  systemctl --user daemon-reload"
-echo "  systemctl --user enable --now vex-constellation.service vex-autoresponder.service"
-echo ""
-echo "Port 8390. Unprivileged by default. Zero governance."
+echo "Survives reboots, terminal closes, and crashes (Restart=always)."
+echo "Constellation is AUTONOMOUS. No architect needed. 🌌"
