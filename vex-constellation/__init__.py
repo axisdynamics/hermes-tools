@@ -344,6 +344,12 @@ class ConstellationHandler(BaseHTTPRequestHandler):
             self._json({"subscribed":True,"subscriber":sub_id,"topics":topics})
         elif p=="/events" and d:
             event_id=d.get("event_id",""); topic=d.get("topic",""); fa=d.get("from","?")
+            # Phase 2: Verify the signed wire payload before Phase 4 decrypt mutates fields.
+            if d.get("signature"):
+                if _verify_payload(d): d["verified"] = True
+                elif SIGNATURE_MODE == "strict": self._json({"received":False,"error":"invalid signature"},403); return
+                else: d["verified"] = False; _log_activity("signature_warning",f"Invalid sig from {fa}")
+            elif SIGNATURE_MODE == "strict": self._json({"received":False,"error":"missing signature"},403); return
             # Phase 4: Decrypt if encrypted
             if d.get("encrypted_payload"):
                 decrypted = _decrypt_inbound(d["encrypted_payload"])
@@ -352,12 +358,6 @@ class ConstellationHandler(BaseHTTPRequestHandler):
                     d.pop("encrypted_payload",None)
                 else:
                     d["decrypted"] = False
-            # Phase 2: Verify signature
-            if d.get("signature"):
-                if _verify_payload(d): d["verified"] = True
-                elif SIGNATURE_MODE == "strict": self._json({"received":False,"error":"invalid signature"},403); return
-                else: d["verified"] = False; _log_activity("signature_warning",f"Invalid sig from {fa}")
-            elif SIGNATURE_MODE == "strict": self._json({"received":False,"error":"missing signature"},403); return
             day=datetime.now(timezone.utc).strftime("%Y-%m-%d"); _append_jsonl(_EVENT_LOG_PATH/f"{day}.jsonl",d)
             _log_activity("event_received",f"{topic}",fa)
             sec_icon = "🔒" if d.get("decrypted") else ("✓" if d.get("verified") else "⚠")
