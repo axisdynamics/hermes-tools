@@ -632,7 +632,7 @@ def _start_peer_cleanup() -> None:
             for h in stale:
                 del _peers[h]
             if stale:
-                _save_peers()
+                _save_peer_map()
     t = threading.Thread(target=_cleanup, daemon=True)
     t.start()
 
@@ -817,7 +817,7 @@ def _discover_peers() -> str:
             lines.append(info)
         lines.append(f"\nAnnounced to all. Use /constellation peers to confirm.")
         return "\n".join(lines)
-    return "No peers found on local network.\n\nTry manual: /constellation announce http://<ip>:8390"
+    return "No peers found on local network.\n\nTry manual: /constellation announce http://<peer-host>:8390"
 
 
 # ── Autonomous mode ────────────────────────────────────────────────────
