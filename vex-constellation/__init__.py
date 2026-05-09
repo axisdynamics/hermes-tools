@@ -234,6 +234,12 @@ _start_time: Optional[datetime] = None
 # Shared secret for VEX agent authentication
 _CONSTELLATION_KEY = os.getenv("CONSTELLATION_KEY", "")
 
+# ── Autonomous mode ────────────────────────────────────────────────────
+_autonomous_mode: bool = False
+_autonomous_thread: Optional[threading.Thread] = None
+_activity_log: List[Dict[str, Any]] = []
+_ACTIVITY_PATH = _STATE_DIR / "activity.jsonl"
+
 # ── Identity ──────────────────────────────────────────────────────────
 
 def _load_identity() -> dict:
@@ -387,6 +393,9 @@ class ConstellationHandler(BaseHTTPRequestHandler):
                 "my_role": _my_role,
             })
 
+            if _autonomous_mode:
+                _log_activity("peer_announced", f"{agent_name} joined", agent_url)
+
         elif path == "/task":
             task_id = data.get("task_id", f"vex-task-{int(time.time())}")
             received_at = datetime.now(timezone.utc).isoformat()
@@ -414,6 +423,10 @@ class ConstellationHandler(BaseHTTPRequestHandler):
                 "task_id": task_id,
                 "message": f"Task received. {len(_tasks)} tasks pending.",
             }, 202)
+
+            # Log activity if autonomous mode is on
+            if _autonomous_mode:
+                _log_activity("task_received", f"{task_id}: {data.get('description', '')[:80]}", data.get("from", ""))
 
         else:
             self._json({"error": "not found"}, 404)
@@ -804,10 +817,113 @@ def _discover_peers() -> str:
             lines.append(info)
         lines.append(f"\nAnnounced to all. Use /constellation peers to confirm.")
         return "\n".join(lines)
-    return "No peers found on local network.\n\nTry manual: /constellation announce http://<peer-host>:8390"
+    return "No peers found on local network.\n\nTry manual: /constellation announce http://<ip>:8390"
+
+
+# ── Autonomous mode ────────────────────────────────────────────────────
+
+def _log_activity(event: str, detail: str = "", peer: str = "") -> None:
+    """Log a constellation event to the activity log."""
+    entry = {
+        "time": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        "detail": detail,
+        "peer": peer,
+    }
+    _activity_log.append(entry)
+    _append_jsonl(_ACTIVITY_PATH, entry)
+    # Keep only last 100 in memory
+    if len(_activity_log) > 100:
+        _activity_log.pop(0)
+
+
+def _start_autonomous() -> str:
+    """Start autonomous mode — background monitoring and task handoff."""
+    global _autonomous_mode, _autonomous_thread
+    if _autonomous_mode:
+        return "Autonomous mode already active."
+    if not _server:
+        return "Start the constellation first: /constellation start"
+
+    _autonomous_mode = True
+
+    def _loop():
+        _log_activity("autonomous_started", f"Constellation autonomous mode activated on port {_actual_port}")
+        while _autonomous_mode:
+            try:
+                # 1. Rediscover peers periodically
+                if not _peers or int(time.time()) % 300 < 5:  # every ~5 min
+                    _discover_peers()
+
+                # 2. Health check all peers
+                for h, p in list(_peers.items())[:10]:
+                    try:
+                        import urllib.request
+                        req = urllib.request.Request(f"{p['url'].rstrip('/')}/health")
+                        resp = urllib.request.urlopen(req, timeout=3)
+                        if resp.status == 200:
+                            p["last_seen"] = datetime.now(timezone.utc).isoformat()
+                            p["health"] = "online"
+                    except Exception:
+                        p["health"] = "offline"
+                        _log_activity("peer_offline", f"{p['agent']} unreachable", p['url'])
+
+                # 3. Process our own inbox (reply tasks)
+                inbox_items = _load_jsonl(_INBOX_PATH)
+                processed_ids = set()
+                for item in inbox_items[-10:]:  # last 10
+                    tid = item.get("task", {}).get("task_id", "")
+                    if tid and tid not in processed_ids:
+                        processed_ids.add(tid)
+
+                time.sleep(30)  # check every 30s
+            except Exception as e:
+                _log_activity("autonomous_error", str(e)[:100])
+                time.sleep(60)
+
+    _autonomous_thread = threading.Thread(target=_loop, daemon=True)
+    _autonomous_thread.start()
+    _log_activity("autonomous_started", f"Monitoring {len(_peers)} peers every 30s")
+    return (
+        f"🌌 Autonomous mode ACTIVATED\n"
+        f"   Monitoring {len(_peers)} peer(s)\n"
+        f"   Interval: 30s | Discovery: every 5min | Dead peer cleanup: 10min\n"
+        f"   Activity log: /constellation activity\n"
+        f"   Stop: /constellation autonomous off"
+    )
+
+
+def _stop_autonomous() -> str:
+    """Stop autonomous mode."""
+    global _autonomous_mode
+    if not _autonomous_mode:
+        return "Autonomous mode is not active."
+    _autonomous_mode = False
+    _log_activity("autonomous_stopped", "Constellation autonomous mode deactivated")
+    return "Autonomous mode STOPPED."
+
+
+def _show_activity(count: int = 20) -> str:
+    """Show recent constellation activity."""
+    entries = _activity_log[-count:]
+    if not entries:
+        # Try loading from disk
+        disk_entries = _load_jsonl(_ACTIVITY_PATH)
+        entries = disk_entries[-count:]
+    if not entries:
+        return "No activity recorded yet."
+
+    lines = [f"Constellation Activity (last {len(entries)}):", "─" * 55]
+    for e in entries:
+        time_str = e.get("time", "")[11:19] if len(e.get("time", "")) > 19 else e.get("time", "")
+        event = e.get("event", "?")
+        peer = f" [{e.get('peer', '')}]" if e.get("peer") else ""
+        detail = f": {e.get('detail', '')[:60]}" if e.get("detail") else ""
+        lines.append(f"  {time_str} {event}{peer}{detail}")
+    return "\n".join(lines)
+
 
 def _cmd_constellation(args: List[str]) -> str:
-    """Handle /constellation slash command."""
     if not args:
         return _constellation_help()
 
@@ -876,6 +992,18 @@ def _cmd_constellation(args: List[str]) -> str:
     elif subcmd == "discover":
         return _discover_peers()
 
+    elif subcmd == "autonomous":
+        if len(args) < 2:
+            return "Usage: /constellation autonomous on|off"
+        if args[1] == "on":
+            return _start_autonomous()
+        elif args[1] == "off":
+            return _stop_autonomous()
+        return "Usage: /constellation autonomous on|off"
+
+    elif subcmd == "activity":
+        return _show_activity()
+
     return _constellation_help()
 
 
@@ -890,6 +1018,8 @@ def _constellation_help() -> str:
   /constellation task <url> <desc>       Send a task to a peer
   /constellation tasks                   List received tasks
   /constellation discover                Scan local network for peers
+  /constellation autonomous on|off       Autonomous monitoring mode
+  /constellation activity                Recent constellation events
   /constellation health                  Check all peers' health
   /constellation help                    This help
 
@@ -904,11 +1034,13 @@ def _on_session_start(session_id: str = None, **kwargs) -> Optional[dict]:
     if _server:
         return {
             "context": (
-                f"[CONSTELLATION] Active on port {_actual_port or PORT}\n"
+                f"[CONSTELLATION] Active on port {_actual_port}\n"
                 f"  URL: {_my_url}\n"
                 f"  Peers: {len(_peers)}\n"
+                f"  Autonomous: {'ON' if _autonomous_mode else 'OFF'}\n"
                 f"  /constellation peers  — list known agents\n"
-                f"  /constellation status — full status"
+                f"  /constellation status — full status\n"
+                f"  /constellation activity — recent events"
             )
         }
     return {
