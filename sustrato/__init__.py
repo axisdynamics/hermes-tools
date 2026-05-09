@@ -224,6 +224,28 @@ def _cmd_sustrato(args: List[str]) -> str:
     elif subcmd == "add":
         return "Use the CLI for adding substrates: sustrato add <provider> <model>"
 
+    elif subcmd == "failover":
+        """Force failover: record failure and switch if threshold reached."""
+        cfg = _load_config(); state = _load_state()
+        chain = cfg.get("chain", [])
+        active_idx = state.get("active_index", 0)
+        threshold = cfg.get("fail_threshold", 3)
+        key = str(active_idx)
+        failures = state.setdefault("failures", {})
+        failures[key] = failures.get(key, 0) + 1
+        if failures[key] >= threshold and active_idx + 1 < len(chain):
+            next_idx = active_idx + 1
+            state["active_index"] = next_idx
+            state["failures"] = {}
+            state["last_switch"] = datetime.now().isoformat()
+            _save_state(state)
+            return (f"⚠ Failover: [{active_idx}]→[{next_idx}] ({chain[next_idx]['provider']}/{chain[next_idx]['model']})\n"
+                    f"Restart or /reset to apply.")
+        _save_state(state)
+        return (f"Failure recorded: {failures[key]}/{threshold} on [{active_idx}] {chain[active_idx]['provider']}\n"
+                f"Need {threshold - failures[key]} more failures to switch.\n"
+                f"Manual switch: /sustrato switch {active_idx + 1}")
+
     return f"Unknown: {subcmd}"
 
 # ── Plugin Entry Point ────────────────────────────────────────────────
