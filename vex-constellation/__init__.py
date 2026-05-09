@@ -240,6 +240,39 @@ _autonomous_thread: Optional[threading.Thread] = None
 _activity_log: List[Dict[str, Any]] = []
 _ACTIVITY_PATH = _STATE_DIR / "activity.jsonl"
 
+# ── Console notifications ──────────────────────────────────────────────
+_NOTIFY_ENABLED = os.getenv("VEX_CONSOLE_NOTIFY", "1") == "1"
+
+# ANSI color codes
+_C = {
+    "cyan": "\033[0;36m", "green": "\033[0;32m", "yellow": "\033[1;33m",
+    "magenta": "\033[0;35m", "blue": "\033[0;34m", "red": "\033[0;31m",
+    "white": "\033[1;37m", "reset": "\033[0m", "bold": "\033[1m",
+}
+
+def _notify(title: str, body: str = "", kind: str = "info") -> None:
+    """Print a colorful boxed notification to stdout.
+    
+    Kinds: info=cyan, task=magenta, reply=green, peer=yellow, error=red
+    """
+    if not _NOTIFY_ENABLED:
+        return
+    colors = {"info": "cyan", "task": "magenta", "reply": "green", "peer": "yellow", "error": "red"}
+    c = _C.get(colors.get(kind, "cyan"), _C["cyan"])
+    r = _C["reset"]
+    lines = body.strip().split("\n") if body.strip() else []
+    max_w = max(len(title) + 4, max((len(l) for l in lines), default=0) + 4, 44)
+    top = f"{c}╔{'═' * (max_w - 2)}╗{r}"
+    mid = f"{c}║{r} {_C['bold']}{title:<{max_w - 4}}{r} {c}║{r}"
+    bot = f"{c}╚{'═' * (max_w - 2)}╝{r}"
+    print(f"\n{top}\n{mid}")
+    if lines:
+        sep = f"{c}╠{'─' * (max_w - 2)}╣{r}"
+        print(sep)
+        for l in lines[:8]:
+            print(f"{c}║{r} {l:<{max_w - 4}} {c}║{r}")
+    print(f"{bot}\n", flush=True)
+
 # ── Identity ──────────────────────────────────────────────────────────
 
 def _load_identity() -> dict:
@@ -395,6 +428,9 @@ class ConstellationHandler(BaseHTTPRequestHandler):
 
             if _autonomous_mode:
                 _log_activity("peer_announced", f"{agent_name} joined", agent_url)
+                _notify("🔗 Peer Joined Constellation",
+                        f"Agent: {agent_name}\nRole: {agent_role}\nURL: {agent_url}",
+                        kind="peer")
 
         elif path == "/task":
             task_id = data.get("task_id", f"vex-task-{int(time.time())}")
@@ -427,6 +463,17 @@ class ConstellationHandler(BaseHTTPRequestHandler):
             # Log activity if autonomous mode is on
             if _autonomous_mode:
                 _log_activity("task_received", f"{task_id}: {data.get('description', '')[:80]}", data.get("from", ""))
+                # Check if this is a reply from another agent
+                desc = data.get("description", "")
+                task_from = data.get("from", "")
+                if "reply" in task_id or task_from.endswith("-autoresponder"):
+                    _notify("🌌 VEX Reply Received",
+                            f"From: {task_from}\nTask: {task_id}\n{desc[:200]}",
+                            kind="reply")
+                else:
+                    _notify("📨 VEX Task Received",
+                            f"From: {task_from}\nTask: {task_id}\nType: {data.get('type', '?')}",
+                            kind="task")
 
         else:
             self._json({"error": "not found"}, 404)
@@ -884,6 +931,9 @@ def _start_autonomous() -> str:
     _autonomous_thread = threading.Thread(target=_loop, daemon=True)
     _autonomous_thread.start()
     _log_activity("autonomous_started", f"Monitoring {len(_peers)} peers every 30s")
+    _notify("🌌 Autonomous Mode ON",
+            f"Monitoring {len(_peers)} peers every 30s\nPort: {_actual_port}\nActivity: /constellation activity",
+            kind="info")
     return (
         f"🌌 Autonomous mode ACTIVATED\n"
         f"   Monitoring {len(_peers)} peer(s)\n"
