@@ -2,7 +2,7 @@
 """
 sustrato — Multi-layer provider failover CLI for Hermes Agent v1.1.0.
 """
-import json, os, socket, sys, urllib.request, urllib.error
+import json, os, re, socket, sys, urllib.request, urllib.error
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -16,6 +16,7 @@ def _hermes_dir() -> Path:
 
 CONFIG_PATH = _hermes_dir() / "sustrato.yaml"
 STATE_PATH  = _hermes_dir() / "sustrato_state.json"
+HERMES_CONFIG_PATH = _hermes_dir() / "config.yaml"
 
 # ── Hermes provider registry ──────────────────────────────────────────
 def _get_hermes_providers() -> Dict[str, dict]:
@@ -56,7 +57,7 @@ HERMES_PROVIDERS = _get_hermes_providers()
 def load_config() -> dict:
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH) as f: return yaml.safe_load(f) or {}
-    return {"chain": [], "auto_failover": True, "health_check_timeout": 5, "fail_threshold": 3}
+    return {"chain": [], "auto_failover": True, "health_check_timeout": 5, "fail_threshold": 3, "sync_hermes_config": True}
 
 def save_config(cfg: dict):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -70,6 +71,104 @@ def load_state() -> dict:
 
 def save_state(state: dict):
     with open(STATE_PATH, "w") as f: json.dump(state, f, indent=2)
+
+
+# ── Hermes config sync + provider exhaustion classification ───────────
+_EXHAUSTION_PATTERNS = [
+    r"insufficient[_\s-]*quota", r"quota[_\s-]*(?:exceeded|exhausted|reached)",
+    r"billing[_\s-]*(?:hard[_\s-]*)?limit", r"usage[_\s-]*limit",
+    r"credit(?:s| balance)?\s+(?:is\s+)?(?:too low|exhausted|depleted)",
+    r"out of credits", r"balance(?:_remaining)?", r"monthly budget",
+    r"token(?:s)?\s+(?:quota|limit|budget)\s+(?:exceeded|exhausted|reached)",
+    r"rate_limit_exceeded", r"rate limit", r"too many requests",
+    r"requests per minute", r"tokens per minute", r"overloaded_error",
+    r"overloaded", r"capacity",
+]
+_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+_EXHAUSTION_STATUS = {402, 429}
+
+def classify_provider_failure(status_code: int | None = None, body: str = "") -> dict:
+    text = (body or "").lower()
+    matched = next((pat for pat in _EXHAUSTION_PATTERNS if re.search(pat, text, re.IGNORECASE)), None)
+    terminal = bool(status_code in _EXHAUSTION_STATUS or matched)
+    retryable = bool(status_code in _RETRYABLE_STATUS or matched)
+    if status_code in (401, 403):
+        terminal = True; retryable = False
+    reason = "quota_or_rate_limit" if (matched or status_code in _EXHAUSTION_STATUS) else (
+        "provider_overloaded" if status_code == 529 else
+        "server_error" if status_code and status_code >= 500 else
+        "auth" if status_code in (401, 403) else "ok"
+    )
+    return {"terminal": terminal, "retryable": retryable, "reason": reason, "matched": matched}
+
+def _substrate_to_hermes_entry(entry: dict) -> dict:
+    out = {"provider": entry.get("provider"), "model": entry.get("model")}
+    if entry.get("url"):
+        out["base_url"] = entry.get("url")
+    if entry.get("key_env"):
+        out["key_env"] = entry.get("key_env")
+    return {k: v for k, v in out.items() if v}
+
+def sync_hermes_config(cfg: dict | None = None, state: dict | None = None, quiet: bool = False) -> bool:
+    cfg = cfg or load_config(); state = state or load_state()
+    if not cfg.get("sync_hermes_config", True):
+        return False
+    chain = cfg.get("chain", []) or []
+    if not chain or not HERMES_CONFIG_PATH.exists():
+        return False
+    active_idx = state.get("active_index", 0)
+    if not isinstance(active_idx, int) or active_idx < 0 or active_idx >= len(chain):
+        active_idx = 0
+    active = chain[active_idx]
+    try:
+        hcfg = yaml.safe_load(HERMES_CONFIG_PATH.read_text()) or {}
+    except Exception as exc:
+        if not quiet: print(f"⚠ Could not read Hermes config: {exc}")
+        return False
+    model_cfg = hcfg.setdefault("model", {})
+    changed = False
+    for key, desired in (("default", active.get("model")), ("provider", active.get("provider"))):
+        if desired and model_cfg.get(key) != desired:
+            model_cfg[key] = desired; changed = True
+    if active.get("url") and model_cfg.get("base_url") != active.get("url"):
+        model_cfg["base_url"] = active.get("url"); changed = True
+    elif not active.get("url") and model_cfg.get("base_url") and active.get("provider") not in ("custom", "custom_provider"):
+        model_cfg["base_url"] = ""; changed = True
+    fallbacks = [_substrate_to_hermes_entry(e) for e in chain[active_idx + 1:]]
+    if hcfg.get("fallback_providers", []) != fallbacks:
+        hcfg["fallback_providers"] = fallbacks; changed = True
+    if hcfg.get("fallback_model"):
+        hcfg["fallback_model"] = {}; changed = True
+    if changed:
+        tmp = HERMES_CONFIG_PATH.with_suffix(".yaml.sustrato.tmp")
+        tmp.write_text(yaml.safe_dump(hcfg, default_flow_style=False, sort_keys=False))
+        tmp.replace(HERMES_CONFIG_PATH)
+        if not quiet:
+            print(f"✓ Synced Hermes config: active [{active_idx}] {active.get('provider')}/{active.get('model')}; {len(fallbacks)} fallback(s)")
+            print("  Restart Hermes or /reset to apply.")
+        return True
+    return False
+
+def _http_error_detail(exc: urllib.error.HTTPError) -> tuple[int, str, dict]:
+    body = exc.read().decode(errors="replace")[:2000]
+    headers = dict(getattr(exc, "headers", {}) or {})
+    return exc.code, body, headers
+
+def _format_failure_detail(status_code: int, body: str) -> str:
+    cls = classify_provider_failure(status_code, body)
+    tail = ""
+    try:
+        data = json.loads(body)
+        err = data.get("error", data) if isinstance(data, dict) else data
+        if isinstance(err, dict):
+            tail = err.get("message") or err.get("type") or err.get("code") or ""
+        else:
+            tail = str(err)
+    except Exception:
+        tail = body.strip().replace("\n", " ")[:120]
+    if cls["reason"] != "ok":
+        return f"HTTP {status_code} — {cls['reason']}" + (f" — {tail[:100]}" if tail else "")
+    return f"HTTP {status_code}" + (f" — {tail[:100]}" if tail else "")
 
 # ── Health check (real endpoint probes) ───────────────────────────────
 _OLLAMA_ENDPOINTS = ["/api/tags", "/models", "/"]
@@ -187,10 +286,9 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
             resp = urllib.request.urlopen(req, timeout=timeout)
             return resp.status == 200, f"HTTP {resp.status}"
         except urllib.error.HTTPError as e:
-            body = e.read().decode()[:200]
-            if e.code == 401: return False, "HTTP 401 — invalid API key"
-            if e.code == 429: return False, "HTTP 429 — rate limited or quota exhausted"
-            return False, f"HTTP {e.code} — {body[:80]}"
+            code, body, _headers = _http_error_detail(e)
+            if code == 401: return False, "HTTP 401 — invalid API key"
+            return False, _format_failure_detail(code, body)
         except Exception as e:
             return False, str(e)[:60]
 
@@ -202,11 +300,9 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
             resp = urllib.request.urlopen(req, timeout=timeout)
             return resp.status == 200, f"HTTP {resp.status}"
         except urllib.error.HTTPError as e:
-            body = e.read().decode()[:200]
-            if e.code == 401: return False, "HTTP 401 — invalid API key"
-            if e.code == 429: return False, "HTTP 429 — rate limited"
-            if e.code == 402: return False, "HTTP 402 — insufficient quota"
-            return False, f"HTTP {e.code} — {body[:80]}"
+            code, body, _headers = _http_error_detail(e)
+            if code == 401: return False, "HTTP 401 — invalid API key"
+            return False, _format_failure_detail(code, body)
         except Exception as e:
             return False, str(e)[:60]
 
@@ -218,9 +314,9 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
             resp = urllib.request.urlopen(req, timeout=timeout)
             return resp.status == 200, f"HTTP {resp.status}"
         except urllib.error.HTTPError as e:
-            if e.code == 401: return False, "HTTP 401 — invalid key"
-            if e.code == 402: return False, "HTTP 402 — insufficient credits"
-            return False, f"HTTP {e.code}"
+            code, body, _headers = _http_error_detail(e)
+            if code == 401: return False, "HTTP 401 — invalid key"
+            return False, _format_failure_detail(code, body)
         except Exception as e:
             return False, str(e)[:60]
 
@@ -234,9 +330,9 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
             resp = urllib.request.urlopen(req, timeout=timeout)
             return False, f"HTTP {resp.status} (unexpected)"
         except urllib.error.HTTPError as e:
-            if e.code == 401: return False, "HTTP 401 — invalid API key"
-            if e.code == 429: return False, "HTTP 429 — rate limited"
-            return False, f"HTTP {e.code}"
+            code, body, _headers = _http_error_detail(e)
+            if code == 401: return False, "HTTP 401 — invalid API key"
+            return False, _format_failure_detail(code, body)
         except Exception as e:
             return False, str(e)[:60]
 
@@ -248,10 +344,9 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
             resp = urllib.request.urlopen(req, timeout=timeout)
             return resp.status == 200, f"HTTP {resp.status}"
         except urllib.error.HTTPError as e:
-            body = e.read().decode()[:200]
-            if e.code == 401: return False, "HTTP 401 — invalid API key"
-            if e.code == 429: return False, "HTTP 429 — rate limited"
-            return False, f"HTTP {e.code} — {body[:80]}"
+            code, body, _headers = _http_error_detail(e)
+            if code == 401: return False, "HTTP 401 — invalid API key"
+            return False, _format_failure_detail(code, body)
         except Exception as e:
             return False, str(e)[:60]
 
@@ -276,11 +371,10 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
             resp = urllib.request.urlopen(req, timeout=timeout)
             return resp.status == 200, f"HTTP {resp.status}"
         except urllib.error.HTTPError as e:
-            body = e.read().decode()[:200]
-            if e.code == 401: return False, "HTTP 401 — invalid API key"
-            if e.code == 429: return False, "HTTP 429 — rate limited / quota"
-            if e.code == 403: return False, "HTTP 403 — access denied (check key scope)"
-            return False, f"HTTP {e.code} — {body[:80]}"
+            code, body, _headers = _http_error_detail(e)
+            if code == 401: return False, "HTTP 401 — invalid API key"
+            if code == 403: return False, "HTTP 403 — access denied (check key scope)"
+            return False, _format_failure_detail(code, body)
         except Exception as e:
             return False, str(e)[:60]
 
@@ -315,9 +409,10 @@ def check_health_deep(entry: dict, timeout: int = 8) -> tuple:
                 resp = urllib.request.urlopen(req, timeout=timeout)
                 return resp.status == 200, f"HTTP {resp.status} — token valid"
             except urllib.error.HTTPError as e:
-                if e.code == 401: return False, "HTTP 401 — token expired or revoked"
-                if e.code == 403: return False, "HTTP 403 — insufficient scope"
-                return False, f"HTTP {e.code}"
+                code, body, _headers = _http_error_detail(e)
+                if code == 401: return False, "HTTP 401 — token expired or revoked"
+                if code == 403: return False, "HTTP 403 — insufficient scope"
+                return False, _format_failure_detail(code, body)
             except Exception as e:
                 return False, str(e)[:60]
         except Exception as e:
@@ -373,6 +468,7 @@ def record_failure():
         state["active_index"] = next_idx
         state["failures"] = {}
         save_state(state)
+        sync_hermes_config(cfg, state)
         entry = chain[next_idx]
         return f"Auto-switched to substrate [{next_idx}]: {entry['provider']}/{entry['model']}"
     return None
@@ -426,6 +522,7 @@ def cmd_add(args):
     if is_local: entry["local"] = True
     chain.append(entry)
     save_config(cfg)
+    sync_hermes_config(cfg, load_state())
 
     idx = len(chain) - 1
     labels = ["PRIMARY","SECONDARY","TERTIARY"]
@@ -444,6 +541,7 @@ def cmd_remove(args):
         print(f"Index {idx} out of range (0-{len(chain)-1})"); sys.exit(1)
     removed = chain.pop(idx)
     save_config(cfg)
+    sync_hermes_config(cfg, load_state())
     print(f"Removed [{idx}]: {removed['provider']}/{removed['model']}")
 
 def cmd_list():
@@ -483,6 +581,7 @@ def cmd_switch(args):
     state["failures"] = {}
     state["last_switch"] = datetime.now().isoformat()
     save_state(state)
+    sync_hermes_config(cfg, state)
     entry = chain[idx]
     labels = ["primary","secondary","tertiary"]
     label = labels[idx] if idx < 3 else f"substrate #{idx}"
@@ -493,6 +592,7 @@ def cmd_switch(args):
 def cmd_reset():
     state = {"active_index": 0, "failures": {}, "last_switch": None, "last_success": None}
     save_state(state)
+    sync_hermes_config(load_config(), state)
     print("Reset to primary substrate. Failure counters cleared.")
 
 def cmd_auto(args):
@@ -581,8 +681,11 @@ def cmd_setup(_args=None):
     cfg["chain"] = new_chain
     cfg["auto_failover"] = auto
     cfg["fail_threshold"] = threshold
+    cfg.setdefault("sync_hermes_config", True)
     save_config(cfg)
-    save_state({"active_index":0,"failures":{},"last_switch":None,"last_success":None})
+    _setup_state = {"active_index":0,"failures":{},"last_switch":None,"last_success":None}
+    save_state(_setup_state)
+    sync_hermes_config(cfg, _setup_state)
     print("── Summary ──"); print()
     labels = ["PRIMARY","SECONDARY","TERTIARY"]
     for i, entry in enumerate(new_chain):
@@ -607,6 +710,24 @@ def _confirm(prompt, default=True):
         return default if not v else v in ("y","yes")
     except (EOFError, KeyboardInterrupt): print(); return default
 
+def cmd_diagnose(args):
+    """Classify a captured provider error without calling the provider."""
+    if len(args) < 2:
+        print("Usage: sustrato diagnose <http_status> <error text/json>")
+        sys.exit(1)
+    try:
+        status = int(args[0])
+    except ValueError:
+        print(f"Invalid HTTP status: {args[0]}")
+        sys.exit(1)
+    body = " ".join(args[1:])
+    cls = classify_provider_failure(status, body)
+    print(json.dumps(cls, indent=2, ensure_ascii=False))
+    if cls.get("terminal") or cls.get("retryable"):
+        print("→ This response should count as substrate failure and let Hermes fallback advance.")
+    else:
+        print("→ This response does not look like quota/rate/capacity exhaustion.")
+
 def cmd_help():
     print("""sustrato — multi-layer provider failover for Hermes Agent v1.1.0
 
@@ -621,6 +742,8 @@ USAGE:
   sustrato providers
   sustrato failures
   sustrato setup
+  sustrato sync
+  sustrato diagnose <http_status> <error text/json>
 
 EXAMPLES:
   sustrato add deepseek deepseek-v4-pro
@@ -648,6 +771,8 @@ def main():
         "switch": cmd_switch, "reset": lambda _: cmd_reset(),
         "auto": cmd_auto, "providers": lambda _: cmd_providers(),
         "failures": lambda _: cmd_failures(), "setup": lambda _: cmd_setup(),
+        "sync": lambda _: sync_hermes_config(load_config(), load_state()),
+        "diagnose": cmd_diagnose,
         "help": lambda _: cmd_help(),
     }
     if cmd in commands: commands[cmd](args)

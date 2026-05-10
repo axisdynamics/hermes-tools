@@ -1,7 +1,7 @@
 """
 Sustrato — Multi-layer provider failover plugin for Hermes Agent v1.1.0.
 """
-import json, os, socket, sys, urllib.request, urllib.error
+import json, os, re, socket, sys, urllib.request, urllib.error
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -17,11 +17,12 @@ def _hermes_dir() -> Path:
 
 CONFIG_PATH = _hermes_dir() / "sustrato.yaml"
 STATE_PATH  = _hermes_dir() / "sustrato_state.json"
+HERMES_CONFIG_PATH = _hermes_dir() / "config.yaml"
 
 def _load_config() -> dict:
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH) as f: return yaml.safe_load(f) or {}
-    return {"chain": [], "auto_failover": True, "health_check_timeout": 5, "fail_threshold": 3}
+    return {"chain": [], "auto_failover": True, "health_check_timeout": 5, "fail_threshold": 3, "sync_hermes_config": True}
 
 def _save_config(cfg: dict):
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -35,6 +36,113 @@ def _load_state() -> dict:
 
 def _save_state(state: dict):
     with open(STATE_PATH, "w") as f: json.dump(state, f, indent=2)
+
+
+# ── Provider exhaustion / quota classification ─────────────────────────
+_EXHAUSTION_PATTERNS = [
+    r"insufficient[_\s-]*quota", r"quota[_\s-]*(?:exceeded|exhausted|reached)",
+    r"billing[_\s-]*(?:hard[_\s-]*)?limit", r"usage[_\s-]*limit",
+    r"credit(?:s| balance)?\s+(?:is\s+)?(?:too low|exhausted|depleted)",
+    r"out of credits", r"balance(?:_remaining)?", r"monthly budget",
+    r"token(?:s)?\s+(?:quota|limit|budget)\s+(?:exceeded|exhausted|reached)",
+    r"rate_limit_exceeded", r"rate limit", r"too many requests",
+    r"requests per minute", r"tokens per minute", r"overloaded_error",
+    r"overloaded", r"capacity",
+]
+_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+_EXHAUSTION_STATUS = {402, 429}
+
+def _classify_provider_failure(status_code: int | None = None, body: str = "") -> dict:
+    """Classify provider failures that should advance the substrate chain.
+
+    Observed provider signals:
+    - OpenAI: HTTP 429 with error.type/code `insufficient_quota` or
+      `rate_limit_exceeded`; messages mention quota, billing, or RPM/TPM.
+    - Anthropic: HTTP 429 `rate_limit_error`; credit/balance messages can also
+      arrive as account/billing failures; HTTP 529 means overloaded.
+    - OpenRouter/OpenAI-compatible proxies: HTTP 402/429 or JSON/text mentioning
+      insufficient credits, balance, upstream rate limits, or no provider capacity.
+    """
+    text = (body or "").lower()
+    matched = None
+    for pat in _EXHAUSTION_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            matched = pat
+            break
+    terminal = bool(status_code in _EXHAUSTION_STATUS or matched)
+    retryable = bool(status_code in _RETRYABLE_STATUS or matched)
+    if status_code in (401, 403):
+        terminal = True
+        retryable = False
+    reason = "ok"
+    if matched or status_code in _EXHAUSTION_STATUS:
+        reason = "quota_or_rate_limit"
+    elif status_code == 529:
+        reason = "provider_overloaded"
+    elif status_code and status_code >= 500:
+        reason = "server_error"
+    elif status_code in (401, 403):
+        reason = "auth"
+    return {"terminal": terminal, "retryable": retryable, "reason": reason, "matched": matched}
+
+def _substrate_to_hermes_entry(entry: dict) -> dict:
+    out = {"provider": entry.get("provider"), "model": entry.get("model")}
+    if entry.get("url"):
+        out["base_url"] = entry.get("url")
+    if entry.get("key_env"):
+        out["key_env"] = entry.get("key_env")
+    return {k: v for k, v in out.items() if v}
+
+def _sync_hermes_config(cfg: dict, state: dict) -> Optional[str]:
+    """Mirror the active Sustrato chain into Hermes runtime config.
+
+    Hermes core performs real in-flight failover from root-level
+    `fallback_providers`/`fallback_model`, not from plugin context text.
+    Keeping this root config in sync is what makes quota/token exhaustion switch
+    providers instead of repeatedly retrying the dead substrate.
+    """
+    if not cfg.get("sync_hermes_config", True):
+        return None
+    chain = cfg.get("chain", []) or []
+    if not chain or not HERMES_CONFIG_PATH.exists():
+        return None
+    active_idx = state.get("active_index", 0)
+    if not isinstance(active_idx, int) or active_idx < 0 or active_idx >= len(chain):
+        active_idx = 0
+    active = chain[active_idx]
+    try:
+        with open(HERMES_CONFIG_PATH) as f:
+            hcfg = yaml.safe_load(f) or {}
+    except Exception as exc:
+        return f"Sustrato could not read Hermes config: {exc}"
+
+    model_cfg = hcfg.setdefault("model", {})
+    changed = False
+    desired_model = active.get("model")
+    desired_provider = active.get("provider")
+    desired_url = active.get("url")
+    for key, desired in (("default", desired_model), ("provider", desired_provider)):
+        if desired and model_cfg.get(key) != desired:
+            model_cfg[key] = desired; changed = True
+    if desired_url and model_cfg.get("base_url") != desired_url:
+        model_cfg["base_url"] = desired_url; changed = True
+    elif not desired_url and model_cfg.get("base_url") and desired_provider not in ("custom", "custom_provider"):
+        # Avoid pinning a previous substrate's endpoint onto a normal provider.
+        model_cfg["base_url"] = ""; changed = True
+
+    fallbacks = [_substrate_to_hermes_entry(e) for e in chain[active_idx + 1:]]
+    if hcfg.get("fallback_providers", []) != fallbacks:
+        hcfg["fallback_providers"] = fallbacks; changed = True
+    if "fallback_model" in hcfg and hcfg.get("fallback_model"):
+        hcfg["fallback_model"] = {}; changed = True
+
+    if changed:
+        tmp = HERMES_CONFIG_PATH.with_suffix(".yaml.sustrato.tmp")
+        with open(tmp, "w") as f:
+            yaml.safe_dump(hcfg, f, default_flow_style=False, sort_keys=False)
+        tmp.replace(HERMES_CONFIG_PATH)
+        return f"Sustrato synced Hermes config: active [{active_idx}] {desired_provider}/{desired_model}; {len(fallbacks)} fallback(s). Restart or /reset to apply."
+    return None
 
 # ── Health check ──────────────────────────────────────────────────────
 _OLLAMA_ENDPOINTS = ["/api/tags", "/models", "/"]
@@ -122,6 +230,7 @@ def _on_session_start(session_id: str = None, **kwargs) -> Optional[dict]:
     if active_idx >= len(chain): active_idx = 0
 
     active = chain[active_idx]
+    sync_msg = _sync_hermes_config(cfg, state)
     lines = ["[SUSTRATO] Active substrate chain:"]
     for i, entry in enumerate(chain):
         marker = " ← CURRENT" if i == active_idx else ""
@@ -130,6 +239,8 @@ def _on_session_start(session_id: str = None, **kwargs) -> Optional[dict]:
 
     if failover_msg:
         lines.append(f"\n⚠ {failover_msg}")
+    if sync_msg:
+        lines.append(f"⚙ {sync_msg}")
 
     if active_idx > 0:
         lines.append(f"⚠ Running on fallback substrate #{active_idx}")
@@ -203,12 +314,15 @@ def _cmd_sustrato(args: List[str]) -> str:
         state["active_index"] = idx; state["failures"] = {}
         state["last_switch"] = datetime.now().isoformat()
         _save_state(state)
+        sync_msg = _sync_hermes_config(cfg, state)
         return (f"Switched to [{idx}] {chain[idx]['provider']}/{chain[idx]['model']}\n"
-                f"Restart or /reset to apply.")
+                f"{sync_msg or 'Restart or /reset to apply.'}")
 
     elif subcmd == "reset":
-        _save_state({"active_index":0, "failures":{}, "last_switch":None, "last_success":None})
-        return "Reset to primary. Failures cleared."
+        state = {"active_index":0, "failures":{}, "last_switch":None, "last_success":None}
+        _save_state(state)
+        sync_msg = _sync_hermes_config(cfg, state)
+        return "Reset to primary. Failures cleared." + (f"\n{sync_msg}" if sync_msg else "")
 
     elif subcmd == "failures":
         threshold = cfg.get("fail_threshold", 3)
@@ -239,8 +353,9 @@ def _cmd_sustrato(args: List[str]) -> str:
             state["failures"] = {}
             state["last_switch"] = datetime.now().isoformat()
             _save_state(state)
+            sync_msg = _sync_hermes_config(cfg, state)
             return (f"⚠ Failover: [{active_idx}]→[{next_idx}] ({chain[next_idx]['provider']}/{chain[next_idx]['model']})\n"
-                    f"Restart or /reset to apply.")
+                    f"{sync_msg or 'Restart or /reset to apply.'}")
         _save_state(state)
         return (f"Failure recorded: {failures[key]}/{threshold} on [{active_idx}] {chain[active_idx]['provider']}\n"
                 f"Need {threshold - failures[key]} more failures to switch.\n"
@@ -255,5 +370,5 @@ def register(ctx):
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_llm_call", _pre_llm_call)
     if not CONFIG_PATH.exists():
-        _save_config({"chain":[], "auto_failover":True, "health_check_timeout":5, "fail_threshold":3})
+        _save_config({"chain":[], "auto_failover":True, "health_check_timeout":5, "fail_threshold":3, "sync_hermes_config":True})
     print(f"[sustrato] Plugin v1.1.0 loaded. {len(_load_config().get('chain',[]))} substrates configured.")
