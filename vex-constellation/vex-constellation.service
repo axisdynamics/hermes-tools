@@ -13,6 +13,7 @@ Environment=PYTHONUNBUFFERED=1
 # Environment=VEX_PUBLIC_URL=http://<this-node-host>:8390
 # Environment=VEX_BOOTSTRAP_PEERS=http://<peer-host>:8390,http://<peer-2-host>:8390
 Environment=VEX_KEEPALIVE_SECONDS=60
+Environment=VEX_AUTOUPDATE_REPOS=hermes-tools=https://github.com/axisdynamics/hermes-tools.git:%h/Documentos/GITHUB/hermes-tools,hermes-skills=https://github.com/axisdynamics/hermes-skills.git:%h/Documentos/GITHUB/hermes-skills
 WorkingDirectory=%h/.hermes/plugins/vex-constellation
 ExecStart=/usr/bin/python3 %h/.hermes/plugins/vex-constellation/run_constellation.py
 Restart=always
