@@ -441,12 +441,73 @@ def _start_server():
     saved=_load_peer_map()
     for h,p in saved.get("peers",{}).items():
         if p.get("url","")!=_my_url: _peers[h]=p
-    return f"🌌 Constellation v{VERSION} active.\n   Signatures: Ed25519 | Encryption: X25519-SealedBox\n   Sig key: {_public_key_hex[:16]}... Enc key: {_enc_public_hex[:16]}...\n   Security: public | signed | encrypted"
+    # Auto-update in background thread (non-blocking)
+    if _AUTOUPDATE_REPOS:
+        threading.Thread(target=_autoupdate_repos, daemon=True).start()
+    return f"🌌 Constellation v{VERSION} active.\n   Signatures: Ed25519 | Encryption: X25519-SealedBox\n   Sig key: {_public_key_hex[:16]}... Enc key: {_enc_public_hex[:16]}...\n   Autoupdate: on"
 
 def _stop_server():
     global _server,_server_thread
     if not _server: return "Not running."; _server.shutdown(); _server_thread.join(timeout=2); _server=None; _server_thread=None
     return "Stopped."
+
+# ── Auto-Update (VEX Autoupdate Skill) ──────────────────────────────────
+_AUTOUPDATE_REPOS = os.environ.get("VEX_AUTOUPDATE_REPOS", "")
+
+def _autoupdate_repos() -> str:
+    """On start, check configured GitHub repos for new commits. Pull + re-install if changed."""
+    if not _AUTOUPDATE_REPOS:
+        return "Autoupdate not configured. Set VEX_AUTOUPDATE_REPOS env var.\nFormat: label=https://github.com/.../repo.git:/local/path,..."
+
+    results = []
+    for entry in _AUTOUPDATE_REPOS.split(","):
+        entry = entry.strip()
+        if "=" not in entry or ":" not in entry:
+            results.append(f"⚠  Invalid entry: {entry}"); continue
+        label, rest = entry.split("=", 1)
+        if ":" not in rest:
+            results.append(f"⚠  Invalid entry (missing path): {entry}"); continue
+        url, path = rest.split(":", 1)
+        git_dir = os.path.expanduser(path)
+
+        if not os.path.isdir(git_dir):
+            results.append(f"⚠  {label}: no local repo at {git_dir}"); continue
+
+        try:
+            import subprocess
+            r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10, cwd=git_dir)
+            before = r.stdout.strip()
+            r = subprocess.run(["git", "fetch", "origin"], capture_output=True, text=True, timeout=15, cwd=git_dir)
+            if r.returncode != 0:
+                results.append(f"⚠  {label}: fetch failed: {r.stderr.strip()[:80]}"); continue
+
+            r = subprocess.run(["git", "merge", "--ff-only", "origin/main"], capture_output=True, text=True, timeout=15, cwd=git_dir)
+            if r.returncode != 0:
+                results.append(f"⚠  {label}: merge conflict or no fast-forward — {r.stderr.strip()[:80]}"); continue
+
+            r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10, cwd=git_dir)
+            after = r.stdout.strip()
+            log = subprocess.run(["git", "log", "--oneline", f"{before[:8]}..{after[:8]}", "--"], capture_output=True, text=True, timeout=5, cwd=git_dir)
+            commits = log.stdout.strip()
+
+            if before != after:
+                results.append(f"✓  {label}: {before[:8]}..{after[:8]} ({len(commits.splitlines()) if commits else '?'} commits)")
+                # Try to reinstall plugins
+                for plugin in ["sustrato", "vex-constellation"]:
+                    installer = os.path.join(git_dir, plugin, "install.sh")
+                    if os.path.isfile(installer):
+                        subprocess.run(["bash", installer], capture_output=True, timeout=30, cwd=os.path.join(git_dir, plugin))
+                        results.append(f"   → {plugin}: re-installed")
+            else:
+                results.append(f"✓  {label}: up to date")
+        except subprocess.TimeoutExpired:
+            results.append(f"⚠  {label}: git timeout")
+        except Exception as e:
+            results.append(f"⚠  {label}: {str(e)[:80]}")
+
+    _log_activity("autoupdate", "; ".join(results))
+    _notify("🔄 VEX Auto-Update", "\n".join(results), kind="info")
+    return "\n".join(results)
 def _start_peer_cleanup():
     def _c():
         while _server:
@@ -528,6 +589,7 @@ def _cmd_constellation(args):
         for s in _subscriptions.values():
             for t in s.get("topics",[]): topics.add(t)
         return "Topics:\n"+"\n".join(f"  {t}" for t in sorted(topics)) if topics else "No topics."
+    elif sub=="autoupdate": return _autoupdate_repos()
     return _help()
 
 def _help():
