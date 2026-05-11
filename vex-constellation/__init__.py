@@ -465,9 +465,8 @@ def _autoupdate_repos() -> str:
         if "=" not in entry or ":" not in entry:
             results.append(f"⚠  Invalid entry: {entry}"); continue
         label, rest = entry.split("=", 1)
-        if ":" not in rest:
-            results.append(f"⚠  Invalid entry (missing path): {entry}"); continue
-        url, path = rest.split(":", 1)
+        path = rest.split(":").pop()
+        url = rest[:-len(path)-1]
         git_dir = os.path.expanduser(path)
 
         if not os.path.isdir(git_dir):
